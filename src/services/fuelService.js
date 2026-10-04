@@ -19,6 +19,60 @@ function newReference(prefix) {
 }
 
 /**
+ * Sequential transaction reference in the form FUEL-YYYYMMDD-NNNNNN, where
+ * NNNNNN is a per-day, zero-padded counter that restarts daily. Retries on
+ * unique-constraint races (two authorizations in the same millisecond).
+ */
+async function nextTransactionReference(tx) {
+  const now = new Date();
+  const datePart = now.toISOString().slice(0, 10).replace(/-/g, '');
+  const prefix = `FUEL-${datePart}-`;
+
+  const last = await tx.fuelTransaction.findFirst({
+    where: { transaction_reference: { startsWith: prefix } },
+    orderBy: { transaction_reference: 'desc' },
+  });
+  let seq = 1;
+  if (last) {
+    const parsed = parseInt(last.transaction_reference.slice(prefix.length), 10);
+    if (Number.isFinite(parsed) && parsed > 0) seq = parsed + 1;
+  }
+  return prefix + String(seq).padStart(6, '0');
+}
+
+/** Create the AUTHORIZED FuelTransaction row with a race-safe sequential reference. */
+async function createAuthorizedTransaction(tx, request, pumpId) {
+  const maxAttempts = 5;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const { reference } = await nextTransactionReference(tx);
+    try {
+      const transaction = await tx.fuelTransaction.create({
+        data: {
+          transaction_reference: reference,
+          request_id: request.id,
+          user_id: request.user_id,
+          station_id: request.station_id,
+          pump_id: pumpId,
+          fuel_type_id: request.fuel_type_id,
+          price_per_litre: request.price_per_litre,
+          authorized_litres: request.requested_litres,
+          authorized_amount: request.requested_amount,
+          status: 'AUTHORIZED',
+          started_at: new Date(),
+        },
+      });
+      return transaction;
+    } catch (error) {
+      const isUniqueRace =
+        error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002';
+      if (isUniqueRace && attempt < maxAttempts) continue;
+      throw error;
+    }
+  }
+  throw new FuelError(500, 'Could not allocate a unique transaction reference');
+}
+
+/**
  * Create a fuel request and atomically reserve the requested amount from the
  * customer's wallet. Price per litre is snapshotted from the fuel type at
  * creation time so later price changes never affect open requests.
@@ -256,7 +310,55 @@ async function rejectRequest(requestId, staff) {
   });
 }
 
-/** Staff authorize an accepted/reserved request at their station: creates the FuelTransaction. */
+/**
+ * Staff assign a pump to a request WITHOUT authorizing yet (stage 8).
+ * Validates ownership, fuel match and availability.
+ */
+async function assignPump(requestId, staff, pump_id) {
+  if (!pump_id) throw new FuelError(400, 'pump_id is required');
+  return prisma.$transaction(async (tx) => {
+    await expireStaleRequests(tx, staff.station_id);
+
+    const request = await tx.fuelRequest.findUnique({ where: { id: requestId } });
+    if (!request) throw new FuelError(404, 'Fuel request not found');
+    if (request.station_id !== staff.station_id) {
+      throw new FuelError(403, 'Request belongs to another station');
+    }
+    if (!['RESERVED', 'ACCEPTED'].includes(request.status)) {
+      throw new FuelError(400, `Cannot assign a pump to a request in status ${request.status}`);
+    }
+
+    const pump = await tx.pump.findUnique({ where: { id: pump_id } });
+    if (!pump || pump.station_id !== staff.station_id) {
+      throw new FuelError(400, 'Pump not found at your station');
+    }
+    if (pump.fuel_type_id !== request.fuel_type_id) {
+      throw new FuelError(400, 'Pump dispenses a different fuel type');
+    }
+    if (pump.status !== 'AVAILABLE') {
+      throw new FuelError(400, `Pump is ${pump.status}, not AVAILABLE`);
+    }
+    if (request.pump_id && request.pump_id !== pump_id) {
+      const previous = await tx.pump.findUnique({ where: { id: request.pump_id } });
+      if (previous && ['RESERVED', 'BUSY'].includes(previous.status)) {
+        await tx.pump.update({ where: { id: previous.id }, data: { status: 'AVAILABLE' } });
+      }
+    }
+
+    const updated = await tx.fuelRequest.update({
+      where: { id: request.id },
+      data: { pump_id },
+    });
+    await tx.pump.update({ where: { id: pump_id }, data: { status: 'RESERVED' } });
+    return updated;
+  });
+}
+
+/**
+ * Staff authorize a request at their station: creates the FuelTransaction with
+ * a unique sequential reference (stage 8). The request must have a pump
+ * assigned; pass pump_id to assign + authorize in a single step.
+ */
 async function authorizeRequest(requestId, staff, pump_id) {
   return prisma.$transaction(async (tx) => {
     await expireStaleRequests(tx, staff.station_id);
@@ -283,25 +385,19 @@ async function authorizeRequest(requestId, staff, pump_id) {
     }
     if (!pumpId) throw new FuelError(400, 'A pump must be assigned to authorize dispensing');
 
-    const transaction = await tx.fuelTransaction.create({
-      data: {
-        transaction_reference: newReference('FTX'),
-        request_id: request.id,
-        user_id: request.user_id,
-        station_id: request.station_id,
-        pump_id: pumpId,
-        fuel_type_id: request.fuel_type_id,
-        price_per_litre: request.price_per_litre,
-        authorized_litres: request.requested_litres,
-        authorized_amount: request.requested_amount,
-        status: 'AUTHORIZED',
-        started_at: new Date(),
-      },
-    });
+    // Free any previously held pump when authorizing on a different one.
+    if (request.pump_id && request.pump_id !== pumpId) {
+      const previous = await tx.pump.findUnique({ where: { id: request.pump_id } });
+      if (previous && ['RESERVED', 'BUSY'].includes(previous.status)) {
+        await tx.pump.update({ where: { id: previous.id }, data: { status: 'AVAILABLE' } });
+      }
+    }
+
+    const transaction = await createAuthorizedTransaction(tx, request, pumpId);
 
     const updatedRequest = await tx.fuelRequest.update({
       where: { id: request.id },
-      data: { status: 'AUTHORIZED', pump_id: pumpId },
+      data: { status: 'AUTHORIZED', pump_id: pumpId, expires_at: null },
     });
     await tx.pump.update({ where: { id: pumpId }, data: { status: 'BUSY' } });
 
@@ -406,6 +502,7 @@ module.exports = {
   cancelRequest,
   acceptRequest,
   rejectRequest,
+  assignPump,
   authorizeRequest,
   completeDispense,
   getStationTransactions,

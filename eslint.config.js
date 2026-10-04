@@ -26,7 +26,7 @@ module.exports = [
     },
   },
   {
-    files: ['src/**/*.js', 'prisma/**/*.js', 'eslint.config.js'],
+    files: ['src/**/*.js', 'prisma/**/*.js', 'scripts/**/*.js', 'eslint.config.js'],
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: 'commonjs',

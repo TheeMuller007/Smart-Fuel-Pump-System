@@ -10,6 +10,7 @@ const fuelRoutes = require('./routes/fuelRoutes');
 const staffRoutes = require('./routes/staffRoutes');
 const adminRoutes = require('./routes/adminRoutes');
 const catalogRoutes = require('./routes/catalogRoutes');
+const deviceRoutes = require('./routes/deviceRoutes');
 const { startRequestExpiryJob } = require('./jobs/requestExpiryJob');
 
 const app = express();
@@ -25,6 +26,7 @@ app.use('/api/fuel-requests', fuelRoutes);
 app.use('/api/staff', staffRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api', catalogRoutes);
+app.use('/api/esp32', deviceRoutes);
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', service: 'Prepaid Smart Fuel Dispensing API' });

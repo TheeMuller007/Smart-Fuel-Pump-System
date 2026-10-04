@@ -82,6 +82,29 @@ router.post('/requests/:id/reject', async (req, res, next) => {
   }
 });
 
+// POST /api/staff/requests/:id/assign-pump { pump_id } — stage 8
+router.post('/requests/:id/assign-pump', async (req, res, next) => {
+  try {
+    const request = await fuelService.assignPump(
+      req.params.id,
+      req.user,
+      (req.body || {}).pump_id
+    );
+    await auditService.log({
+      stationUserId: req.user.sub,
+      stationId: req.user.station_id,
+      action: 'ASSIGN_PUMP',
+      entityType: 'fuel_request',
+      entityId: req.params.id,
+      description: `Assigned pump ${request.pump_id} to request ${request.request_reference}`,
+      ipAddress: req.ip,
+    });
+    res.json(request);
+  } catch (error) {
+    next(error);
+  }
+});
+
 // POST /api/staff/fuel-requests/:id/authorize { pump_id? }
 router.post('/fuel-requests/:id/authorize', async (req, res, next) => {
   try {

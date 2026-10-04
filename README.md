@@ -74,11 +74,16 @@ Or run everything in Docker: `docker compose up --build`.
 | GET    | `/api/staff/fuel-requests`          | staff     | Alias of `/api/staff/pending-requests`   |
 | GET    | `/api/staff/pending-requests`       | staff     | Pending (RESERVED/ACCEPTED) requests     |
 | POST   | `/api/staff/requests/:id/accept`    | staff     | Accept: keep reservation, status ACCEPTED |
+| POST   | `/api/staff/requests/:id/assign-pump` | staff     | Stage 8: hold a pump for a request       |
 | POST   | `/api/staff/requests/:id/reject`    | staff     | Reject: release reservation, status REJECTED |
 | POST   | `/api/staff/fuel-requests/:id/authorize` | staff | Authorize pump (FuelTransaction)       |
 | POST   | `/api/staff/fuel-requests/:id/cancel`    | staff | Cancel + release                        |
 | GET    | `/api/staff/fuel-transactions`      | staff     | Station transaction log                  |
 | POST   | `/api/staff/fuel-transactions/:id/complete` | staff | Complete dispense, settle ledger     |
+| GET    | `/api/esp32/authorizations/:pump_id` | device¹   | Signed AUTHORIZED transaction for a pump |
+| POST   | `/api/esp32/authorizations/:pump_id/ack` | device¹ | Controller reports dispense result      |
+
+<sup>¹</sup> Device endpoints authenticate with the `x-api-key` header (`ESP32_API_KEY`) and are disabled when it is unset.
 
 Full request/response schemas: [`api/openapi.yaml`](api/openapi.yaml).
 
@@ -161,6 +166,39 @@ double-release funds.
 - [x] `POST /staff/requests/:id/reject` → release reservation, status = REJECTED
 - [x] UI: Pending Requests table with **Accept** / **Reject** actions
 - **Deliverable:** Staff can approve/reject; wallet balances adjust correctly
+
+### Stage 8 – Pump Assignment & Authorization Token ✅
+- [x] `POST /staff/requests/:id/assign-pump` (stores `pump_id`, holds pump as RESERVED)
+- [x] `POST /staff/requests/:id/authorize` creates `fuel_transactions` row with unique
+      `transaction_reference` (`FUEL-YYYYMMDD-NNNNNN`, sequential per day, race-safe) and status `AUTHORIZED`
+- [x] Pull endpoint for ESP32: `GET /esp32/authorizations/:pump_id` (HMAC-signed payload,
+      API-key auth, optional station pinning)
+- [x] UI: Assign Pump dropdown + **Assign** button, **Authorize** enabled once assigned
+- **Deliverable:** Signed transaction that the ESP32 can fetch
+
+## ESP32 Pump Controller Integration
+
+Configure in `.env`:
+
+```
+ESP32_API_KEY="a-long-random-string"     # x-api-key the controller sends; empty = endpoints disabled
+DEVICE_SIGNING_SECRET="another-secret"   # HMAC key; defaults to ESP32_API_KEY
+DEVICE_STATION_ID="<station uuid>"       # optional pin for single-station controllers
+```
+
+Poll loop on the controller:
+
+1. `GET /api/esp32/authorizations/<pump_id>` with header `x-api-key: $ESP32_API_KEY`
+   - `authorization: null` → nothing to dispense, keep polling
+   - otherwise verify `signature` = HMAC-SHA256(`DEVICE_SIGNING_SECRET`, fields joined by `|`
+     in `signature_payload_fields` order) before dispensing a single millilitre
+2. Dispense up to `authorized_litres` at `price_per_litre`
+3. Report the result: `POST /api/esp32/authorizations/<pump_id>/ack`
+   `{ "transaction_id", "actual_litres", "device_signature" }`
+   - server settles the wallet (FUEL_PAYMENT for the dispensed amount, RELEASE for the
+     unused reserve) and frees the pump
+   - `device_signature` is optional but recommended: it proves the ack came from the
+     device that received the signed authorization
 
 ## ER Diagram
 

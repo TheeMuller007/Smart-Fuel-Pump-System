@@ -360,12 +360,17 @@
           '<tr><td>' + ref(r.request_reference) + '</td><td>' + esc(r.user.full_name) + '</td><td>' + esc(r.fuel_type.name) + '</td>' +
           '<td>' + Number(r.requested_litres).toFixed(3) + '</td><td>' + money(r.requested_amount) + '</td><td>' + badge(r.status) + '</td>' +
           '<td>' +
+          (r.pump_id ? '<span class="muted">Pump ' + (r.pump ? r.pump.pump_number : '?') + ' assigned</span><br/>' : '') +
           (r.status === 'RESERVED' ? '<button class="small success" data-accept="' + r.id + '">Accept</button> ' : '') +
           '<button class="small danger" data-reject="' + r.id + '">Reject</button>' +
-          '<div style="margin-top:6px"><select class="pump-pick" data-req="' + r.id + '"><option value="">— pump —</option>' +
-          pumps.filter((p) => p.status === 'AVAILABLE' && p.fuel_type.id === r.fuel_type_id)
-            .map((p) => '<option value="' + p.id + '">Pump ' + p.pump_number + '</option>').join('') + '</select> ' +
-          '<button class="small primary" data-auth="' + r.id + '">Authorize</button></div>' +
+          '<div style="margin-top:6px">' +
+          (r.pump_id ? '' :
+            '<select class="pump-pick" data-req="' + r.id + '"><option value="">— assign pump —</option>' +
+            pumps.filter((p) => p.status === 'AVAILABLE' && p.fuel_type.id === r.fuel_type_id)
+              .map((p) => '<option value="' + p.id + '">Pump ' + p.pump_number + '</option>').join('') + '</select> ' +
+            '<button class="small" data-assign="' + r.id + '">Assign</button> ') +
+          '<button class="small primary" data-auth="' + r.id + '" ' + (r.pump_id ? '' : 'disabled title="Assign a pump first"') + '>Authorize</button>' +
+          '</div>' +
           '</td></tr>'
         ).join('') + '</tbody></table>') + '</div>' +
 
@@ -380,12 +385,23 @@
           '<td>' + (t.status === 'AUTHORIZED' ? '<span class="row"><input class="small actual" style="width:90px" type="number" step="0.001" min="0.001" max="' + Number(t.authorized_litres) + '" placeholder="litres" data-txn="' + t.id + '" /><button class="small primary" data-done="' + t.id + '">Complete</button></span>' : '') + '</td></tr>'
         ).join('') + '</tbody></table>') + '</div>';
 
+    root.querySelectorAll('[data-assign]').forEach((btn) => {
+      btn.onclick = async () => {
+        const pick = root.querySelector('.pump-pick[data-req="' + btn.getAttribute('data-assign') + '"]');
+        if (!pick || !pick.value) { alert('Pick a pump to assign first.'); return; }
+        try {
+          await api('/api/staff/requests/' + btn.getAttribute('data-assign') + '/assign-pump', {
+            method: 'POST', body: JSON.stringify({ pump_id: pick.value }),
+          });
+          staffView();
+        } catch (e) { alert(e.message); }
+      };
+    });
     root.querySelectorAll('[data-auth]').forEach((btn) => {
       btn.onclick = async () => {
-        const pick = root.querySelector('.pump-pick[data-req="' + btn.getAttribute('data-auth') + '"]');
         try {
           await api('/api/staff/fuel-requests/' + btn.getAttribute('data-auth') + '/authorize', {
-            method: 'POST', body: JSON.stringify({ pump_id: pick ? pick.value || undefined : undefined }),
+            method: 'POST', body: JSON.stringify({}),
           });
           staffView();
         } catch (e) { alert(e.message); }

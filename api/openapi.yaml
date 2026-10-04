@@ -17,6 +17,7 @@ tags:
   - name: Stations
   - name: Staff
   - name: Admin
+  - name: Devices
 components:
   securitySchemes:
     bearerAuth:
@@ -322,10 +323,29 @@ paths:
       summary: Alias of /staff/pending-requests (backwards compatible)
       responses:
         '200': { description: Pending requests }
+  /staff/requests/{id}/assign-pump:
+    post:
+      tags: [Staff]
+      summary: Assign a pump to a request (holds it as RESERVED, no authorization yet)
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pump_id]
+              properties:
+                pump_id: { type: string, format: uuid }
+      responses:
+        '200': { description: Request with pump assigned }
+        '400': { description: Pump unavailable / wrong fuel / wrong status }
+        '403': { description: Request belongs to another station }
   /staff/fuel-requests/{id}/authorize:
     post:
       tags: [Staff]
-      summary: Authorize a request and create the FuelTransaction
+      summary: Authorize dispensing — creates the FuelTransaction with a unique sequential reference (FUEL-YYYYMMDD-NNNNNN)
       parameters:
         - { in: path, name: id, required: true, schema: { type: string } }
       requestBody:
@@ -334,11 +354,43 @@ paths:
             schema:
               type: object
               properties:
-                pump_id: { type: string, format: uuid, description: Overrides the request's pump }
+                pump_id: { type: string, format: uuid, description: Overrides/sets the pump in the same step }
       responses:
-        '200': { description: Authorized request + transaction }
+        '200': { description: Authorized request + transaction ready for the pump controller }
         '400': { description: No pump assignable or wrong status }
         '403': { description: Request belongs to another station }
+  /esp32/authorizations/{pump_id}:
+    get:
+      tags: [Devices]
+      summary: Pull endpoint for pump controllers (ESP32) — signed AUTHORIZED transaction for the pump
+      security: []
+      parameters:
+        - { in: path, name: pump_id, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Authorization payload (or null when nothing pending), signed with HMAC-SHA256 }
+        '401': { description: Invalid/missing x-api-key }
+        '503': { description: ESP32_API_KEY not configured (endpoint disabled) }
+  /esp32/authorizations/{pump_id}/ack:
+    post:
+      tags: [Devices]
+      summary: Controller reports the dispense result — settles the wallet (payment + remainder release)
+      security: []
+      parameters:
+        - { in: path, name: pump_id, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [transaction_id, actual_litres]
+              properties:
+                transaction_id: { type: string }
+                actual_litres: { type: number }
+                device_signature: { type: string, description: Optional; must equal the signature issued at authorization }
+      responses:
+        '200': { description: Settlement result }
+        '400': { description: Bad litres / signature mismatch / wrong status }
   /staff/fuel-requests/{id}/cancel:
     post:
       tags: [Staff]
