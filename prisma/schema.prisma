@@ -1,0 +1,194 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(uuid())
+  full_name    String
+  phone        String?  @unique
+  email        String   @unique
+  password_hash String
+  status       String   @default("ACTIVE")
+  created_at   DateTime @default(now())
+  updated_at   DateTime @updatedAt
+  last_login   DateTime?
+  wallet       Wallet?
+  walletTransactions WalletTransaction[]
+  refreshTokens RefreshToken[]
+  fuelRequests FuelRequest[]
+  fuelTransactions FuelTransaction[]
+  auditLogs AuditLog[]
+}
+
+model Station {
+  id        String   @id @default(uuid())
+  name      String
+  location  String
+  status    String   @default("ACTIVE")
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+  stationUsers StationUser[]
+  pumps     Pump[]
+  fuelRequests FuelRequest[]
+  fuelTransactions FuelTransaction[]
+  walletTransactions WalletTransaction[]
+  auditLogs AuditLog[]
+}
+
+model StationUser {
+  id          String   @id @default(uuid())
+  station_id  String
+  station     Station  @relation(fields: [station_id], references: [id])
+  username    String   @unique
+  password_hash String
+  full_name   String
+  role        String
+  status      String   @default("ACTIVE")
+  created_at  DateTime @default(now())
+  updated_at  DateTime @updatedAt
+  last_login  DateTime?
+  auditLogs   AuditLog[]
+  refreshTokens RefreshToken[]
+}
+
+model RefreshToken {
+  id              String       @id @default(uuid())
+  token_hash      String       @unique
+  user_id         String?
+  user            User?        @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  station_user_id String?
+  stationUser     StationUser? @relation(fields: [station_user_id], references: [id], onDelete: Cascade)
+  expires_at      DateTime
+  revoked_at      DateTime?
+  created_at      DateTime     @default(now())
+
+  @@index([user_id])
+  @@index([station_user_id])
+}
+
+model Wallet {
+  id                String   @id @default(uuid())
+  user_id           String   @unique
+  user              User     @relation(fields: [user_id], references: [id])
+  available_balance Decimal @default(0)
+  reserved_balance  Decimal @default(0)
+  currency          String   @default("USD")
+  status            String   @default("ACTIVE")
+  created_at        DateTime @default(now())
+  updated_at        DateTime @updatedAt
+  transactions      WalletTransaction[]
+}
+
+model WalletTransaction {
+  id            String   @id @default(uuid())
+  wallet_id     String
+  wallet        Wallet   @relation(fields: [wallet_id], references: [id])
+  user_id       String?
+  user          User?    @relation(fields: [user_id], references: [id])
+  station_id    String?
+  station       Station? @relation(fields: [station_id], references: [id])
+  type          String
+  amount        Decimal
+  balance_before Decimal
+  balance_after  Decimal
+  reference     String   @unique
+  performed_by  String?
+  description   String?
+  created_at    DateTime @default(now())
+}
+
+model FuelType {
+  id               String   @id @default(uuid())
+  name             String   @unique
+  price_per_litre  Decimal
+  currency         String   @default("USD")
+  status           String   @default("ACTIVE")
+  created_at       DateTime @default(now())
+  updated_at       DateTime @updatedAt
+  pumps            Pump[]
+  fuelRequests     FuelRequest[]
+  fuelTransactions FuelTransaction[]
+}
+
+model Pump {
+  id           String   @id @default(uuid())
+  station_id   String
+  station      Station  @relation(fields: [station_id], references: [id])
+  pump_number  Int
+  status       String   @default("AVAILABLE")
+  fuel_type_id String
+  fuel_type    FuelType @relation(fields: [fuel_type_id], references: [id])
+  controller_id String?
+  created_at   DateTime @default(now())
+  updated_at   DateTime @updatedAt
+  fuelRequests FuelRequest[]
+  fuelTransactions FuelTransaction[]
+}
+
+model FuelRequest {
+  id                 String   @id @default(uuid())
+  request_reference  String   @unique
+  user_id            String
+  user               User     @relation(fields: [user_id], references: [id])
+  station_id         String
+  station            Station  @relation(fields: [station_id], references: [id])
+  fuel_type_id       String
+  fuel_type          FuelType @relation(fields: [fuel_type_id], references: [id])
+  pump_id            String?
+  pump               Pump?    @relation(fields: [pump_id], references: [id])
+  requested_litres   Decimal
+  requested_amount   Decimal
+  price_per_litre    Decimal
+  status             String   @default("CREATED")
+  expires_at         DateTime?
+  created_at         DateTime @default(now())
+  updated_at         DateTime @updatedAt
+  fuelTransaction    FuelTransaction?
+}
+
+model FuelTransaction {
+  id                  String   @id @default(uuid())
+  transaction_reference String @unique
+  request_id            String   @unique
+  request             FuelRequest @relation(fields: [request_id], references: [id])
+  user_id             String
+  user                User     @relation(fields: [user_id], references: [id])
+  station_id          String
+  station             Station  @relation(fields: [station_id], references: [id])
+  pump_id             String
+  pump                Pump     @relation(fields: [pump_id], references: [id])
+  fuel_type_id        String
+  fuel_type           FuelType @relation(fields: [fuel_type_id], references: [id])
+  price_per_litre     Decimal
+  authorized_litres   Decimal
+  actual_litres       Decimal?
+  authorized_amount   Decimal
+  final_amount        Decimal?
+  refund_amount       Decimal?
+  status              String   @default("AUTHORIZED")
+  started_at          DateTime?
+  completed_at        DateTime?
+  created_at          DateTime @default(now())
+  updated_at          DateTime @updatedAt
+}
+
+model AuditLog {
+  id               String   @id @default(uuid())
+  user_id          String?
+  user             User?    @relation(fields: [user_id], references: [id])
+  station_user_id  String?
+  stationUser      StationUser? @relation(fields: [station_user_id], references: [id])
+  station_id       String?
+  station          Station? @relation(fields: [station_id], references: [id])
+  action           String
+  entity_type      String?
+  entity_id        String?
+  description      String?
+  ip_address       String?
+  created_at       DateTime @default(now())
+}

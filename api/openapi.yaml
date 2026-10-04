@@ -1,0 +1,437 @@
+openapi: 3.0.3
+info:
+  title: Prepaid Smart Fuel Dispensing API
+  version: 2.0.0
+  description: >
+    Customers hold prepaid wallets. Creating a fuel request reserves funds;
+    staff authorize a pump and complete the dispense, which charges the wallet
+    from the reserve and releases the unused remainder. Staff can also credit
+    customer wallets with cash deposits.
+servers:
+  - url: http://localhost:4000/api
+tags:
+  - name: Auth
+  - name: Customers
+  - name: Wallet
+  - name: Fuel
+  - name: Stations
+  - name: Staff
+  - name: Admin
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    Error:
+      type: object
+      properties:
+        message:
+          type: string
+    AuthResult:
+      type: object
+      properties:
+        accessToken: { type: string }
+        refreshToken: { type: string }
+        user:
+          type: object
+          properties:
+            id: { type: string }
+            full_name: { type: string }
+            email: { type: string }
+            username: { type: string }
+            role: { type: string, enum: [customer, staff, admin] }
+            station_id: { type: string }
+    Wallet:
+      type: object
+      properties:
+        id: { type: string }
+        available_balance: { type: string }
+        reserved_balance: { type: string }
+        currency: { type: string }
+        status: { type: string }
+    WalletTransaction:
+      type: object
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [CASH_DEPOSIT, RESERVATION, RELEASE, FUEL_PAYMENT, REFUND] }
+        amount: { type: string }
+        balance_before: { type: string }
+        balance_after: { type: string }
+        reference: { type: string }
+        description: { type: string }
+        created_at: { type: string, format: date-time }
+    FuelType:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        price_per_litre: { type: string }
+        currency: { type: string }
+        status: { type: string, enum: [ACTIVE, INACTIVE] }
+    FuelRequest:
+      type: object
+      properties:
+        id: { type: string }
+        request_reference: { type: string }
+        requested_litres: { type: string }
+        requested_amount: { type: string }
+        price_per_litre: { type: string, description: Price snapshot taken at creation }
+        status: { type: string, enum: [RESERVED, ACCEPTED, AUTHORIZED, COMPLETED, CANCELLED, EXPIRED, REJECTED] }
+        expires_at: { type: string, format: date-time }
+security:
+  - bearerAuth: []
+paths:
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Login (customer email or staff username)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string }
+                password: { type: string }
+      responses:
+        '200': { description: Access + refresh tokens with user info }
+        '401': { description: Invalid credentials, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Rotate refresh token and mint a new access token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties:
+                refreshToken: { type: string }
+      responses:
+        '200': { description: New token pair }
+        '401': { description: Invalid or expired refresh token }
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Revoke a refresh token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties:
+                refreshToken: { type: string }
+      responses:
+        '200': { description: Logged out }
+  /customers/register:
+    post:
+      tags: [Customers]
+      summary: Register a customer (wallet is created automatically)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [full_name, email, password]
+              properties:
+                full_name: { type: string }
+                email: { type: string }
+                phone: { type: string }
+                password: { type: string, minLength: 8 }
+      responses:
+        '201': { description: Created; returns token pair, $ref: '#/components/schemas/AuthResult' }
+        '409': { description: Email already registered }
+  /wallet:
+    get:
+      tags: [Wallet]
+      summary: Current customer wallet balances
+      responses:
+        '200': { description: Wallet, $ref: '#/components/schemas/Wallet' }
+        '404': { description: Wallet not found }
+  /wallet/deposit:
+    post:
+      tags: [Wallet]
+      summary: Cash deposit (ledger CASH_DEPOSIT)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount]
+              properties:
+                amount: { type: number }
+                description: { type: string }
+      responses:
+        '201': { description: Updated wallet + ledger entry }
+        '400': { description: Invalid amount }
+  /wallet/transactions:
+    get:
+      tags: [Wallet]
+      summary: Paginated ledger history
+      parameters:
+        - { in: query, name: page, schema: { type: integer, default: 1 } }
+        - { in: query, name: limit, schema: { type: integer, default: 20, maximum: 100 } }
+      responses:
+        '200':
+          description: Paginated transactions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  page: { type: integer }
+                  limit: { type: integer }
+                  total: { type: integer }
+                  total_pages: { type: integer }
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/WalletTransaction' }
+  /stations:
+    get:
+      tags: [Stations]
+      summary: List active stations
+      security: []
+      responses:
+        '200': { description: Station list }
+  /stations/{id}/pumps:
+    get:
+      tags: [Stations]
+      summary: Pumps for a station
+      security: []
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Pump list with fuel type }
+  /fuel-types:
+    get:
+      tags: [Stations]
+      summary: Active fuel catalogue with prices
+      security: []
+      responses:
+        '200':
+          description: Fuel types
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/FuelType' }
+  /fuel-requests:
+    post:
+      tags: [Fuel]
+      summary: Create a request and reserve wallet funds
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [station_id, fuel_type_id, requested_litres]
+              properties:
+                station_id: { type: string, format: uuid }
+                fuel_type_id: { type: string, format: uuid }
+                pump_id: { type: string, format: uuid }
+                requested_litres: { type: number }
+      responses:
+        '201': { description: Reserved request, $ref: '#/components/schemas/FuelRequest' }
+        '400': { description: Validation failure or insufficient available balance }
+    get:
+      tags: [Fuel]
+      summary: List the current customer's requests
+      responses:
+        '200': { description: Recent requests }
+  /fuel-requests/{id}/cancel:
+    post:
+      tags: [Fuel]
+      summary: Cancel own request and release reserved funds
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Cancelled request }
+        '400': { description: Request not in RESERVED status }
+        '403': { description: Not your request }
+  /staff/customers:
+    get:
+      tags: [Staff]
+      summary: Search customers by phone (or name/email)
+      parameters:
+        - { in: query, name: phone, required: true, schema: { type: string }, description: Also accepts `q` }
+      responses:
+        '200': { description: Matching customers with wallet summary }
+        '400': { description: Missing search term }
+  /staff/deposits:
+    post:
+      tags: [Staff]
+      summary: Credit a customer's wallet with cash (audited under staff ID)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_id, amount]
+              properties:
+                user_id: { type: string, format: uuid }
+                amount: { type: number, maximum: 10000 }
+                description: { type: string }
+      responses:
+        '201': { description: Deposit confirmation with wallet, entry and customer }
+        '404': { description: Customer or wallet not found }
+  /staff/pending-requests:
+    get:
+      tags: [Staff]
+      summary: Pending (RESERVED + ACCEPTED) requests at the staff member's station
+      responses:
+        '200': { description: Pending requests with customer, fuel type and pump }
+  /staff/requests/{id}/accept:
+    post:
+      tags: [Staff]
+      summary: Accept a RESERVED request (reservation kept, status ACCEPTED)
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Accepted request }
+        '400': { description: Wrong status }
+        '403': { description: Request belongs to another station }
+  /staff/requests/{id}/reject:
+    post:
+      tags: [Staff]
+      summary: Reject a pending request (reservation released, status REJECTED)
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Rejected request; funds released }
+        '400': { description: Wrong status }
+        '403': { description: Request belongs to another station }
+  /staff/fuel-requests:
+    get:
+      tags: [Staff]
+      summary: Alias of /staff/pending-requests (backwards compatible)
+      responses:
+        '200': { description: Pending requests }
+  /staff/fuel-requests/{id}/authorize:
+    post:
+      tags: [Staff]
+      summary: Authorize a request and create the FuelTransaction
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                pump_id: { type: string, format: uuid, description: Overrides the request's pump }
+      responses:
+        '200': { description: Authorized request + transaction }
+        '400': { description: No pump assignable or wrong status }
+        '403': { description: Request belongs to another station }
+  /staff/fuel-requests/{id}/cancel:
+    post:
+      tags: [Staff]
+      summary: Cancel a RESERVED request at the staff member's station
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Cancelled }
+  /staff/fuel-transactions:
+    get:
+      tags: [Staff]
+      summary: Recent transactions at the staff member's station
+      responses:
+        '200': { description: Transaction list }
+  /staff/fuel-transactions/{id}/complete:
+    post:
+      tags: [Staff]
+      summary: Complete a dispense (charges reserve, releases remainder)
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [actual_litres]
+              properties:
+                actual_litres: { type: number }
+      responses:
+        '200': { description: Completed transaction with final_amount and refund_amount }
+        '400': { description: More than authorized, or wrong status }
+  /admin/fuel-types:
+    get:
+      tags: [Admin]
+      summary: Full fuel catalogue (admin view, includes inactive)
+      responses:
+        '200': { description: Fuel types }
+    post:
+      tags: [Admin]
+      summary: Create a fuel type
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, price_per_litre]
+              properties:
+                name: { type: string }
+                price_per_litre: { type: number }
+                currency: { type: string, default: USD }
+      responses:
+        '201': { description: Created }
+        '409': { description: Name already exists }
+  /admin/fuel-types/{id}:
+    patch:
+      tags: [Admin]
+      summary: Update name, price, currency or status (live price edits)
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                price_per_litre: { type: number }
+                currency: { type: string }
+                status: { type: string, enum: [ACTIVE, INACTIVE] }
+      responses:
+        '200': { description: Updated fuel type }
+    delete:
+      tags: [Admin]
+      summary: Delete a fuel type (deactivates it when in use)
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Outcome
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted: { type: boolean }
+                  deactivated: { type: boolean }
+                  message: { type: string }
+  /health:
+    get:
+      tags: [Auth]
+      summary: Liveness probe
+      security: []
+      responses:
+        '200': { description: Service health }

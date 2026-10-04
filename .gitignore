@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+
+# Environment
+.env
+.env.local
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Build / coverage
+dist/
+build/
+coverage/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Tooling artifacts
+.freebuff/

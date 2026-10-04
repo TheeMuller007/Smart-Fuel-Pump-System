@@ -1,0 +1,150 @@
+:root {
+  --bg: #0f1420;
+  --panel: #171e2e;
+  --panel-2: #1e2740;
+  --border: #2a3552;
+  --text: #e8ecf5;
+  --muted: #93a0b8;
+  --accent: #4f8cff;
+  --accent-2: #36c98e;
+  --danger: #ff5d5d;
+  --warn: #f5b83d;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 24px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+header h1 { font-size: 18px; margin: 0; }
+nav { display: flex; gap: 6px; margin-left: 12px; flex-wrap: wrap; }
+nav a {
+  color: var(--muted);
+  text-decoration: none;
+  padding: 6px 12px;
+  border-radius: 8px;
+  font-size: 14px;
+}
+nav a.active, nav a:hover { color: var(--text); background: var(--panel-2); }
+#user-chip { margin-left: auto; color: var(--muted); font-size: 13px; display: flex; gap: 10px; align-items: center; }
+
+main { max-width: 1080px; margin: 24px auto; padding: 0 16px; }
+h2 { margin: 0 0 16px; font-size: 20px; }
+h3 { margin: 0 0 10px; font-size: 15px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 18px;
+  margin-bottom: 18px;
+}
+.grid { display: grid; gap: 18px; }
+.grid.cols-2 { grid-template-columns: 1fr 1fr; }
+.grid.cols-3 { grid-template-columns: repeat(3, 1fr); }
+@media (max-width: 800px) { .grid.cols-2, .grid.cols-3 { grid-template-columns: 1fr; } }
+
+.balances { display: flex; gap: 18px; }
+.balance { flex: 1; background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+.balance .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; }
+.balance .value { font-size: 26px; font-weight: 600; margin-top: 4px; }
+.balance.reserved .value { color: var(--warn); }
+.balance.available .value { color: var(--accent-2); }
+
+label { display: block; color: var(--muted); font-size: 13px; margin: 10px 0 4px; }
+input, select {
+  width: 100%;
+  padding: 9px 11px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 14px;
+}
+input:focus, select:focus { outline: 1px solid var(--accent); }
+
+button {
+  padding: 9px 16px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 14px;
+  cursor: pointer;
+}
+button:hover { border-color: var(--accent); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.success { background: var(--accent-2); border-color: var(--accent-2); color: #06281c; }
+button.danger { background: transparent; border-color: var(--danger); color: var(--danger); }
+button.small { padding: 5px 10px; font-size: 13px; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--border); }
+th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+tr:last-child td { border-bottom: none; }
+
+.badge {
+  display: inline-block; padding: 2px 10px; border-radius: 999px;
+  font-size: 12px; border: 1px solid var(--border); color: var(--muted);
+}
+.badge.RESERVED, .badge.AUTHORIZED, .badge.ACTIVE { color: var(--accent); border-color: var(--accent); }
+.badge.ACCEPTED { color: var(--accent-2); border-color: var(--accent-2); }
+.badge.REJECTED { color: var(--danger); border-color: var(--danger); }
+.badge.COMPLETED, .badge.CASH_DEPOSIT, .badge.REFUND { color: var(--accent-2); border-color: var(--accent-2); }
+.badge.CANCELLED, .badge.EXPIRED { color: var(--danger); border-color: var(--danger); }
+.badge.INACTIVE { color: var(--danger); border-color: var(--danger); }
+.badge.FUEL_PAYMENT { color: var(--warn); border-color: var(--warn); }
+.badge.RESERVATION { color: var(--warn); border-color: var(--warn); }
+.badge.RELEASE { color: var(--muted); }
+
+.pos { color: var(--accent-2); }
+.neg { color: var(--danger); }
+
+.tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+.tabs button { flex: 1; }
+.tabs button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+.auth-wrap { max-width: 420px; margin: 48px auto; }
+.muted { color: var(--muted); font-size: 13px; }
+.error-box { background: rgba(255, 93, 93, 0.12); border: 1px solid var(--danger); color: var(--danger); border-radius: 8px; padding: 10px 12px; margin: 10px 0; font-size: 14px; }
+.ok-box { background: rgba(54, 201, 142, 0.12); border: 1px solid var(--accent-2); color: var(--accent-2); border-radius: 8px; padding: 10px 12px; margin: 10px 0; font-size: 14px; }
+.row { display: flex; gap: 10px; align-items: end; }
+.row > * { flex: 1; }
+.row > button { flex: 0 0 auto; }
+
+.modal-backdrop {
+  position: fixed; inset: 0; background: rgba(5, 8, 15, 0.7);
+  display: flex; align-items: center; justify-content: center; z-index: 50;
+}
+.modal {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+  padding: 20px; width: 420px; max-width: 92vw;
+}
+.modal h3 { color: var(--text); }
+.modal-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px; }
+
+.confirm { text-align: center; padding: 10px 0; }
+.confirm .tick { font-size: 44px; color: var(--accent-2); }
+.confirm .amount { font-size: 30px; font-weight: 700; margin: 8px 0 2px; }
+
+.search-result { display: flex; align-items: center; gap: 12px; padding: 10px; border: 1px solid var(--border); border-radius: 10px; margin-top: 10px; background: var(--panel-2); }
+.search-result .who { flex: 1; }
+.search-result .who .name { font-weight: 600; }
+.search-result .who .sub { color: var(--muted); font-size: 13px; }
+.search-result .bal { text-align: right; color: var(--accent-2); font-weight: 600; }
+
+.pager { display: flex; gap: 10px; align-items: center; justify-content: end; margin-top: 12px; }
+.mono { font-family: 'Cascadia Code', Consolas, monospace; font-size: 12px; color: var(--muted); }

@@ -1,0 +1,29 @@
+version: '3.8'
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: smart-fuel-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: smart_fuel_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d
+
+  backend:
+    build: .
+    container_name: smart-fuel-backend
+    ports:
+      - "4000:4000"
+    environment:
+      - DATABASE_URL=postgresql://postgres:password@db:5432/smart_fuel_db
+      - JWT_SECRET=supersecret
+      - PORT=4000
+    depends_on:
+      - db
+
+volumes:
+  pgdata:
