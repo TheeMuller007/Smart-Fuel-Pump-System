@@ -61,6 +61,13 @@ async function ledgerEntryInTx(tx, data) {
     throw new LedgerError(400, 'amount must be greater than zero');
   }
 
+  // Row-level lock: serializes concurrent ledger writes on the same wallet so
+  // read-compute-write updates can never double-spend (two simultaneous
+  // reservations both passing an insufficient-balance check, etc.).
+  const locked = await tx.$queryRaw`SELECT id FROM "Wallet" WHERE id = ${walletId} FOR UPDATE`;
+  if (!locked || locked.length === 0) {
+    throw new LedgerError(404, 'Wallet not found');
+  }
   const wallet = await tx.wallet.findUnique({ where: { id: walletId } });
   if (!wallet) {
     throw new LedgerError(404, 'Wallet not found');

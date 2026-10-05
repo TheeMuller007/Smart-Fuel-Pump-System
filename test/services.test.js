@@ -79,6 +79,8 @@ describe('walletService.ledgerEntryInTx', () => {
     };
     const entries = [];
     return {
+      // Emulate the FOR UPDATE row lock (always grants; no row -> empty array).
+      async $queryRaw() { return [{ id: wallet.id }]; },
       wallet: {
         async findUnique() { return { ...wallet }; },
         async update({ data }) {

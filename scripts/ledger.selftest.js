@@ -36,6 +36,8 @@ function makeStubTx() {
 
 function fakeTx(stub) {
   return {
+    // Emulate the FOR UPDATE row lock the real ledger takes on the wallet row.
+    async $queryRaw() { return [{ id: 'w1' }]; },
     wallet: {
       findUnique: stub.walletFindUnique.bind(stub),
       update: stub.walletUpdate.bind(stub),

@@ -156,7 +156,10 @@ async function releaseHeldPump(tx, request) {
   if (!request.pump_id) return;
   const pump = await tx.pump.findUnique({ where: { id: request.pump_id } });
   if (pump && ['RESERVED', 'BUSY'].includes(pump.status)) {
-    await tx.pump.update({ where: { id: pump.id }, data: { status: 'AVAILABLE' } });
+    await tx.pump.update({
+      where: { id: pump.id },
+      data: { status: 'AVAILABLE', dispense_state: null, last_reported_litres: null },
+    });
   }
 }
 
@@ -465,8 +468,22 @@ async function completeDispense(transactionId, { actual_litres }, staff) {
     if (txn.station_id !== staff.station_id) {
       throw new FuelError(403, 'Transaction belongs to another station');
     }
+    if (txn.status === 'COMPLETED') {
+      // Idempotency for racing/duplicate completions: return the settled row
+      // instead of charging the wallet a second time.
+      return txn;
+    }
     if (txn.status !== 'AUTHORIZED') {
       throw new FuelError(400, `Cannot complete a transaction in status ${txn.status}`);
+    }
+    // Claim the transaction under a row lock: concurrent completions (device
+    // ack racing a staff click, duplicated acks) serialize here, and only the
+    // winner settles; the loser re-reads COMPLETED and returns above.
+    const claimed = await tx.$queryRaw`SELECT id FROM "FuelTransaction" WHERE id = ${txn.id} AND status = 'AUTHORIZED' FOR UPDATE`;
+    if (!claimed || claimed.length === 0) {
+      const latest = await tx.fuelTransaction.findUnique({ where: { id: txn.id } });
+      if (latest && latest.status === 'COMPLETED') return latest;
+      throw new FuelError(400, `Cannot complete a transaction in status ${latest ? latest.status : 'unknown'}`);
     }
 
     const actual = D(actual_litres);
@@ -519,7 +536,10 @@ async function completeDispense(transactionId, { actual_litres }, staff) {
     });
 
     await tx.fuelRequest.update({ where: { id: txn.request_id }, data: { status: 'COMPLETED' } });
-    await tx.pump.update({ where: { id: txn.pump_id }, data: { status: 'AVAILABLE' } });
+    await tx.pump.update({
+      where: { id: txn.pump_id },
+      data: { status: 'AVAILABLE', dispense_state: null, last_reported_litres: null },
+    });
 
     return completed;
   }).then(async (completed) => {

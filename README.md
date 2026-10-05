@@ -351,6 +351,46 @@ Security posture: bcrypt-only password hashing, JWT access (15 m) + rotating ref
 API, constant-time device API-key comparison, HMAC-signed device payloads, receipt URLs with
 expiring signed tokens, configurable CORS, and secrets via `.env` (never committed).
 
+## Production-Readiness Notes
+
+Fail-safes built into the dispensing loop — worth understanding before a real deployment:
+
+- **Wallet ledger is row-locked.** Every balance change takes `SELECT … FOR UPDATE` on the
+  wallet row, so concurrent reservations can never double-spend; the insufficient-balance
+  check and the write are serialized.
+- **Settlement is claim-guarded.** `completeDispense` claims the transaction under a row lock;
+  a device ack racing a staff completion (or duplicate acks) settles exactly once — losers
+  see `already_completed` and the wallet is touched once.
+- **Power loss on the controller never loses money.** The ESP32 firmware persists the open
+  transaction (id + signature + metered litres) to NVS *before* opening the relay and
+  checkpoints it every 10 s. On reboot it completes the *same* transaction for the litres
+  actually dispensed — it never re-dispenses from zero. A failed settlement ack is retried
+  until the server accepts it (the server side is idempotent), and a rejected/cancelled
+  session is dropped cleanly.
+- **Pumps never stay stuck.** A background reaper (`STUCK_DISPENSE_TIMEOUT_MIN`, default 10)
+  cancels `AUTHORIZED` transactions whose controller stopped sending telemetry, releases the
+  pump, and returns the request to `RESERVED` so staff can reassign it. The customer is never
+  charged for fuel the server never confirmed. A device that is merely slow is protected by a
+  heartbeat grace and left alone. Devices that reboot mid-dispense re-poll the same
+  transaction and receive a `resume.already_dispensed_litres` hint instead of restarting.
+- **Graceful shutdown.** SIGTERM/SIGINT stop new work and let in-flight DB transactions
+  (wallet math) finish before exit; unhandled rejections are logged loudly.
+
+Ops checklist for going live (outside this repo's scope, but plan for it):
+
+1. **HTTPS** — terminate TLS at a reverse proxy (Caddy/nginx) or set `SERVER_USE_TLS` on the
+   device with a pinned fingerprint; device API traffic over plain HTTP on a LAN is fine for
+   demos only.
+2. **Backups** — `pg_dump smart_fuel_db` on a schedule (the ledger *is* the money); keep the
+   `receipts/` directory with it (or regenerate receipts on demand).
+3. **Secrets** — set real `JWT_SECRET`, `ESP32_API_KEY`, `DEVICE_SIGNING_SECRET` per station
+   in the environment; compose only provides dev fallbacks.
+4. **Monitoring** — watch `/api/health`, the `[stuck-job]` / `[expiry-job]` log lines, and
+   `GET /api/admin/audit-logs` for `DEVICE_COMPLETE_FUEL_DISPENSE` entries (every device
+   settlement is audited against the authenticated API key).
+5. **UPS** — the relay fails safe (pump off) on power loss, but a small UPS on the controller
+   and server avoids stuck-transaction recovery entirely.
+
 ## ER Diagram
 
 ```mermaid

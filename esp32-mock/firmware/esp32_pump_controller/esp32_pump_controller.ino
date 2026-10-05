@@ -27,6 +27,7 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <mbedtls/md.h>
+#include <Preferences.h>
 
 #include "config.h"
 
@@ -38,7 +39,7 @@ void IRAM_ATTR onFlowPulse() {
 }
 
 // ---- State --------------------------------------------------------------------
-enum ControllerState { IDLE, DISPENSING, FAULT };
+enum ControllerState { IDLE, DISPENSING, COMPLETING, FAULT };
 ControllerState gState = IDLE;
 
 String gTxnId;
@@ -46,15 +47,49 @@ String gTxnRef;
 String gSignature;
 float gAuthorizedLitres = 0.0f;
 float gStartLitres = 0.0f;
+float gCarryLitres = 0.0f;      // litres confirmed before this boot/session
 unsigned long gDispenseStartMs = 0;
 unsigned long gLastStatusMs = 0;
 unsigned long gLastPulseMs = 0;
+unsigned long gLastAckMs = 0;
 String gLastError;
 
 unsigned long gLastPollMs = 0;
 
+Preferences gPrefs;
+const char* SESSION_NS = "fuelpump";
+
 float litresFromPulses(unsigned long pulses) {
   return (float)pulses / PULSES_PER_LITRE;
+}
+
+/** Total litres dispensed for the open transaction, across reboots. */
+float currentLitres() {
+  return gCarryLitres + litresFromPulses(gPulseCount) - gStartLitres;
+}
+
+// ---- Crash-safe session (NVS) ---------------------------------------------------
+// The open transaction is persisted BEFORE the relay opens and cleared only
+// after the server acknowledges settlement. A controller that loses power
+// mid-dispense recovers on boot and settles for the litres actually measured —
+// it can never restart the meter from zero.
+void saveSession() {
+  gPrefs.putString("txn", gTxnId);
+  gPrefs.putString("ref", gTxnRef);
+  gPrefs.putString("sig", gSignature);
+  gPrefs.putFloat("auth", gAuthorizedLitres);
+  gPrefs.putFloat("disp", gCarryLitres);
+}
+
+/** Rebase the meter: fold litres-so-far into the persisted carry. */
+void checkpointSession(float litres) {
+  gCarryLitres = litres;
+  gStartLitres = litresFromPulses(gPulseCount);
+  gPrefs.putFloat("disp", gCarryLitres);
+}
+
+void clearSession() {
+  gPrefs.clear();
 }
 
 // ---- HMAC-SHA256 (mbedTLS, bundled with the ESP32 Arduino core) -----------------
@@ -164,8 +199,12 @@ bool pollForAuthorization() {
 
 // ---- Dispensing -------------------------------------------------------------------------
 void startDispense() {
-  gState = DISPENSING;
+  // Persist BEFORE actuating: a power cut between these two lines leaves a
+  // session on disk with a closed relay — safe.
+  gCarryLitres = 0.0f;
   gStartLitres = litresFromPulses(gPulseCount);
+  saveSession();
+  gState = DISPENSING;
   gDispenseStartMs = millis();
   gLastPulseMs = millis();
   gLastError = "";
@@ -180,7 +219,7 @@ void stopRelay() {
 }
 
 void reportStatus(const String& pumpState, const String& error = "") {
-  const float current = litresFromPulses(gPulseCount) - gStartLitres;
+  const float current = currentLitres();
   String json = "{\"current_litres\":" + String(current, 3) +
                 ",\"pump_state\":\"" + pumpState + "\"";
   if (error.length() > 0) {
@@ -190,21 +229,55 @@ void reportStatus(const String& pumpState, const String& error = "") {
   httpPost(baseUrl() + "/api/esp32/status/" + PUMP_ID, json);
 }
 
-void completeDispense() {
-  stopRelay();
-  const float finalLitres = litresFromPulses(gPulseCount) - gStartLitres;
+/** Send the completion ack for the open transaction. Returns the HTTP code. */
+int sendAck() {
+  const float finalLitres = currentLitres();
   String json = "{\"transaction_id\":\"" + gTxnId + "\",\"actual_litres\":" +
                 String(finalLitres, 3) + ",\"device_signature\":\"" + gSignature + "\"}";
-  const int code = httpPost(baseUrl() + "/api/esp32/authorizations/" + PUMP_ID + "/ack", json);
-  if (code >= 200 && code < 300) {
-    Serial.printf("[PUMP] Completed %.3f L — wallet settled\n", finalLitres);
-  } else {
-    // The server is idempotent: a retry later returns already_completed.
-    Serial.println("[PUMP] Ack failed — will retry next loop");
-  }
+  return httpPost(baseUrl() + "/api/esp32/authorizations/" + PUMP_ID + "/ack", json);
+}
+
+void finishDispense(const char* note) {
+  Serial.printf("[PUMP] Completed %.3f L — wallet settled%s\n", currentLitres(), note);
+  clearSession();
   reportStatus("COMPLETED");
   gState = IDLE;
   gTxnId = "";
+  gCarryLitres = 0.0f;
+}
+
+void completeDispense() {
+  stopRelay();
+  const int code = sendAck();
+  if (code >= 200 && code < 300) {
+    finishDispense("");
+  } else {
+    // Relay closed, meter frozen, NVS session kept: retry the ack until the
+    // server accepts it (settlement is idempotent — already_completed).
+    gState = COMPLETING;
+    gLastAckMs = millis();
+    reportStatus("COMPLETING");
+    Serial.println("[PUMP] Ack failed — will retry until the server accepts it");
+  }
+}
+
+void tickCompleting() {
+  const unsigned long now = millis();
+  if (now - gLastAckMs < ACK_RETRY_MS) return;
+  gLastAckMs = now;
+  const int code = sendAck(); // exactly one POST per retry
+  if (code >= 200 && code < 300) {
+    finishDispense(" (after retry)");
+  } else if (code == 400 || code == 404 || code == 409) {
+    // The server refused the settlement (e.g. it cancelled this transaction
+    // as stuck while we were offline) — nothing left to settle; drop it.
+    Serial.printf("[PUMP] Ack rejected (%d) — clearing session\n", code);
+    clearSession();
+    reportStatus("COMPLETED");
+    gState = IDLE;
+    gTxnId = "";
+    gCarryLitres = 0.0f;
+  }
 }
 
 void enterFault(const String& reason) {
@@ -217,13 +290,21 @@ void enterFault(const String& reason) {
 
 void tickDispensing() {
   const unsigned long now = millis();
-  const float current = litresFromPulses(gPulseCount) - gStartLitres;
+  const float current = currentLitres();
 
   // Track pulse recency for the no-flow timeout.
   static unsigned long sLastCount = 0;
   if (gPulseCount != sLastCount) {
     sLastCount = gPulseCount;
     gLastPulseMs = now;
+  }
+
+  // Checkpoint the meter periodically so a sudden power cut loses at most
+  // CHECKPOINT_INTERVAL_S of metered fuel, not the whole dispense.
+  static unsigned long sLastCheckpointMs = 0;
+  if (now - sLastCheckpointMs >= 10000UL) {
+    sLastCheckpointMs = now;
+    checkpointSession(current);
   }
 
   if (current >= gAuthorizedLitres) {
@@ -253,6 +334,25 @@ void setup() {
   pinMode(FLOW_SENSOR_PIN, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(FLOW_SENSOR_PIN), onFlowPulse, FALLING);
   ensureWifi();
+
+  // Crash recovery: a persisted session means power was lost mid-transaction.
+  // The relay stays CLOSED; the controller resumes/keeps the session so the
+  // server's settled quantity always matches the litres actually dispensed.
+  gPrefs.begin(SESSION_NS, false);
+  const String savedTxn = gPrefs.getString("txn", "");
+  if (savedTxn.length() > 0) {
+    gTxnId = savedTxn;
+    gTxnRef = gPrefs.getString("ref", "");
+    gSignature = gPrefs.getString("sig", "");
+    gAuthorizedLitres = gPrefs.getFloat("auth", 0.0f);
+    gCarryLitres = gPrefs.getFloat("disp", 0.0f);
+    gStartLitres = litresFromPulses(gPulseCount);
+    Serial.printf("[BOOT] Recovering transaction %s at %.3f L — completing without re-dispensing\n",
+                  gTxnRef.c_str(), gCarryLitres);
+    gState = COMPLETING;
+    gLastAckMs = 0;
+    return;
+  }
   Serial.println("[BOOT] Pump controller ready");
 }
 
@@ -270,6 +370,9 @@ void loop() {
       break;
     case DISPENSING:
       tickDispensing();
+      break;
+    case COMPLETING:
+      tickCompleting();
       break;
     case FAULT:
       // Stay in fault until power cycle; keep reporting so dashboards see it.

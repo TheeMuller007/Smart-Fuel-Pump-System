@@ -17,6 +17,9 @@ function signingSecret() {
   return process.env.DEVICE_SIGNING_SECRET || apiKey();
 }
 
+/** Heartbeat grace: telemetry older than this means the device is presumed offline. */
+const RESUME_GRACE_MS = 90 * 1000;
+
 /**
  * Constant-time API key check for pump controllers.
  * The key must be configured via ESP32_API_KEY; when unset the endpoint is
@@ -32,6 +35,9 @@ function assertDeviceAccess(req) {
   if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
     throw new DeviceError(401, 'Invalid device API key');
   }
+  // Remember which station this device is pinned to (optional DEVICE_STATION_ID)
+  // so completion audits carry the station without extra lookups.
+  req.device_station_id = process.env.DEVICE_STATION_ID || null;
 }
 
 /** Canonical string of the transaction fields that get signed. */
@@ -90,6 +96,18 @@ async function updateStatus(pumpId, { current_litres, pump_state, error } = {}) 
   };
   lastStatus.set(pumpId, status);
 
+  // Persist the transient fields so crashes/restarts don't blind the
+  // dashboards and the stuck-dispense reaper can distinguish a live device
+  // from a dead one (heartbeat vs. telemetry age).
+  await prisma.pump.update({
+    where: { id: pumpId },
+    data: {
+      dispense_state: state,
+      last_status_at: new Date(),
+      ...(current !== null ? { last_reported_litres: current } : {}),
+    },
+  });
+
   // Customers watching their own dispense via /api/stream/me also get the
   // telemetry when their transaction is the active one on this pump.
   const targets = [{ type: 'pump', id: pumpId }, { type: 'station', id: pump.station_id }];
@@ -129,6 +147,18 @@ async function getAuthorizationForPump(pumpId) {
     return { pump: { id: pump.id, pump_number: pump.pump_number, status: pump.status }, authorization: null };
   }
 
+  // Idempotency anchor: a device that reboots mid-dispense (power loss, brown-
+  // out) re-polls, gets the same AUTHORIZED transaction, and must NOT restart
+  // the meter from zero — the litres dispensed before the reboot are already
+  // flowing through the pulse counter into reserved funds.
+  const acked = txn.actual_litres != null ? Number(txn.actual_litres) : null;
+  const dispensing = pump.dispense_state === 'DISPENSING' &&
+    pump.last_status_at &&
+    Date.now() - new Date(pump.last_status_at).getTime() < RESUME_GRACE_MS;
+  const liveLitres = dispensing && pump.last_reported_litres != null
+    ? Number(pump.last_reported_litres)
+    : null;
+
   return {
     pump: { id: pump.id, pump_number: pump.pump_number, status: pump.status },
     authorization: {
@@ -145,6 +175,10 @@ async function getAuthorizationForPump(pumpId) {
       fuel_type: pump.fuel_type.name,
       status: txn.status,
       started_at: txn.started_at,
+      resume: {
+        already_dispensed_litres: liveLitres != null ? liveLitres : acked,
+        source: liveLitres != null ? 'live_telemetry' : acked != null ? 'acknowledged' : null,
+      },
       signature: signTransaction(txn),
       signature_alg: 'HMAC-SHA256',
       signature_payload_fields: [

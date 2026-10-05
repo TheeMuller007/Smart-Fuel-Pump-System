@@ -3,6 +3,7 @@ services:
   db:
     image: postgres:15-alpine
     container_name: smart-fuel-db
+    restart: unless-stopped
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: password
@@ -25,12 +26,19 @@ services:
       - "4000:4000"
     environment:
       - DATABASE_URL=postgresql://postgres:password@db:5432/smart_fuel_db
-      - JWT_SECRET=supersecret
+      # Secrets must come from the environment/.env — compose only supplies a
+      # last-resort dev fallback for JWT so a fresh clone boots; set real ones
+      # before any deployment that faces a network.
+      - JWT_SECRET=${JWT_SECRET:-dev-only-change-me}
       - PORT=4000
-      - CORS_ORIGIN=*
+      - CORS_ORIGIN=${CORS_ORIGIN:-*}
       - ESP32_API_KEY=${ESP32_API_KEY:-}
       - DEVICE_SIGNING_SECRET=${DEVICE_SIGNING_SECRET:-}
       - DEVICE_STATION_ID=${DEVICE_STATION_ID:-}
+      - STUCK_DISPENSE_TIMEOUT_MIN=${STUCK_DISPENSE_TIMEOUT_MIN:-10}
+    volumes:
+      # Persist generated receipts across container rebuilds.
+      - ./receipts:/usr/src/app/receipts
     depends_on:
       db:
         condition: service_healthy

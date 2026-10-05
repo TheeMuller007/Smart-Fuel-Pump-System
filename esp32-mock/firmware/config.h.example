@@ -32,3 +32,9 @@ const unsigned long POLL_INTERVAL_MS      = 3000;   // authorization polling
 const unsigned long STATUS_INTERVAL_MS    = 2000;   // telemetry POST cadence
 const unsigned long NO_FLOW_TIMEOUT_MS    = 10000;  // relay open, zero pulses → fault
 const unsigned long DISPENSE_TIMEOUT_MS   = 600000; // hard cap per dispense (10 min)
+
+// ---- Crash-safety ------------------------------------------------------------------------------
+// The controller persists the open transaction to flash (NVS) before opening
+// the relay and keeps retrying settlement until the server accepts it, so a
+// power cut mid-dispense always settles for fuel actually measured.
+const unsigned long ACK_RETRY_MS           = 5000;  // settle-retry cadence after a failed ack

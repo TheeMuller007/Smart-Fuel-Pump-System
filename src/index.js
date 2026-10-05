@@ -21,6 +21,7 @@ const receiptRoutes = require('./routes/receiptRoutes');
 const transactionRoutes = require('./routes/transactionRoutes');
 const streamRoutes = require('./routes/streamRoutes');
 const { startRequestExpiryJob } = require('./jobs/requestExpiryJob');
+const { startStuckDispenseJob } = require('./jobs/stuckDispenseJob');
 
 const app = express();
 
@@ -120,12 +121,34 @@ app.use((err, _req, res, _next) => {
 // ---- Background jobs ------------------------------------------------------------
 // Auto-expire stale RESERVED fuel requests and release funds.
 startRequestExpiryJob();
+// Recover pumps whose controller died mid-dispense (power loss, network drop).
+startStuckDispenseJob();
+
+// A crash must never take the DB down with it (e.g. mid-transaction), and
+// operators need the reason in the log — log loudly, exit non-zero.
+process.on('unhandledRejection', (reason) => {
+  console.error('[fatal] unhandled rejection:', reason);
+});
 
 // Ignore empty/zero PORT env values (some sandboxes export PORT=0).
 const portEnv = parseInt(process.env.PORT, 10);
 const PORT = Number.isFinite(portEnv) && portEnv > 0 ? portEnv : 4000;
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`Server listening on port ${PORT}`);
   console.log(`Portal: http://localhost:${PORT}`);
   if (openapiSpec) console.log(`API docs: http://localhost:${PORT}/docs`);
 });
+
+// Graceful shutdown: stop accepting new work, let in-flight requests (and any
+// in-flight DB transactions — wallet math must never be interrupted) finish.
+function shutdown(signal) {
+  console.log(`[shutdown] ${signal} received — closing server`);
+  const force = setTimeout(() => process.exit(1), 10000);
+  if (typeof force.unref === 'function') force.unref();
+  server.close(() => {
+    console.log('[shutdown] server closed cleanly');
+    process.exit(0);
+  });
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));

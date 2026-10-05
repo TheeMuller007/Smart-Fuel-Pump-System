@@ -124,6 +124,9 @@ model Pump {
   fuel_type_id String
   fuel_type    FuelType @relation(fields: [fuel_type_id], references: [id])
   controller_id String?
+  dispense_state String?   @db.Text
+  last_status_at DateTime?
+  last_reported_litres Decimal?
   created_at   DateTime @default(now())
   updated_at   DateTime @updatedAt
   fuelRequests FuelRequest[]
