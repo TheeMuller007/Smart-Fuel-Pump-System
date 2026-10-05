@@ -10,6 +10,9 @@ logs/
 *.log
 npm-debug.log*
 
+# Runtime artifacts
+receipts/
+
 # Build / coverage
 dist/
 build/
@@ -23,3 +26,7 @@ Thumbs.db
 
 # Tooling artifacts
 .freebuff/
+
+# Project-local PostgreSQL cluster (scripts/localdb.js)
+.pgdata/
+.pgpwfile

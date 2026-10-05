@@ -42,14 +42,38 @@ settles the final payment and releases any unused reserve.
 
 ## Getting Started
 
+Two ways to provide PostgreSQL — both use the same schema and seed:
+
+### Option 1 — Docker Postgres (no install, host port 5433)
+
 ```bash
-cp .env.example .env          # adjust if needed
+cp .env.example .env          # keep the default DATABASE_URL (:5433)
 docker compose up -d db       # start PostgreSQL (runs migrations/*.sql on first init)
 npm install
 npm run db:push               # sync Prisma schema (idempotent safety net)
 npm run seed                  # demo data
 npm run dev                   # API + portal on http://localhost:4000
 ```
+
+Note: inside Docker, services reach the DB at `db:5432`; from the host it is
+`localhost:5433`. The compose `esp32-mock` service also runs against the
+backend automatically when started with `--profile mock`.
+
+### Option 2 — Project-local Postgres without Docker (Windows)
+
+Uses the PostgreSQL binaries already installed on the machine to create a
+dedicated cluster in `.pgdata/` on port 5433 (does not touch any existing
+Postgres service or its data):
+
+```bash
+npm run db:setup              # one-time: initdb into .pgdata
+npm run db:start              # start the cluster (also: db:stop / db:status)
+npm run db:push && npm run seed
+npm run dev
+```
+
+The cluster is a normal process and does not survive reboots — after a
+restart, run `npm run db:start` again before `npm run dev`.
 
 Or run everything in Docker: `docker compose up --build`.
 
@@ -308,7 +332,7 @@ docker exec smart-fuel-db psql -U postgres -c "CREATE DATABASE smart_fuel_test;"
 Then run it:
 
 ```bash
-npm run test:e2e                          # uses postgresql://postgres:password@localhost:5432/smart_fuel_test
+npm run test:e2e                          # DB derived from DATABASE_URL in .env (database smart_fuel_test)
 npm run test:e2e -- --db-url postgresql://user:pass@host:5432/other  # custom database
 npm run test:e2e -- --port 4200           # different API port
 npm run test:e2e -- --skip-migrate        # schema already applied

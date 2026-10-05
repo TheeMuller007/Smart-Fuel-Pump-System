@@ -44,7 +44,7 @@ async function nextTransactionReference(tx) {
 async function createAuthorizedTransaction(tx, request, pumpId) {
   const maxAttempts = 5;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const { reference } = await nextTransactionReference(tx);
+    const reference = await nextTransactionReference(tx);
     try {
       const transaction = await tx.fuelTransaction.create({
         data: {
@@ -81,6 +81,7 @@ async function createFuelRequest(user, { station_id, fuel_type_id, pump_id, requ
   if (!station_id || !fuel_type_id) {
     throw new FuelError(400, 'station_id and fuel_type_id are required');
   }
+  const userId = user.sub || user.id; // JWT carries the id in `sub`
 
   return prisma.$transaction(async (tx) => {
     const fuelType = await tx.fuelType.findUnique({ where: { id: fuel_type_id } });
@@ -114,13 +115,13 @@ async function createFuelRequest(user, { station_id, fuel_type_id, pump_id, requ
     const price = D(fuelType.price_per_litre); // price snapshot
     const requestedAmount = price.mul(litres).toFixed(2);
 
-    const wallet = await tx.wallet.findUnique({ where: { user_id: user.id } });
+    const wallet = await tx.wallet.findUnique({ where: { user_id: userId } });
     if (!wallet) throw new FuelError(404, 'Wallet not found');
 
     const request = await tx.fuelRequest.create({
       data: {
         request_reference: newReference('REQ'),
-        user_id: user.id,
+        user_id: userId,
         station_id,
         fuel_type_id,
         pump_id: pump_id || null,
@@ -139,7 +140,7 @@ async function createFuelRequest(user, { station_id, fuel_type_id, pump_id, requ
       reference: `RSV-${request.request_reference}`,
       description: `Fuel reservation ${request.request_reference}`,
       stationId: station_id,
-      userId: user.id,
+      userId,
     });
 
     return request;

@@ -134,6 +134,11 @@ async function getAuthorizationForPump(pumpId) {
     authorization: {
       transaction_id: txn.id,
       transaction_reference: txn.transaction_reference,
+      request_id: txn.request_id,
+      user_id: txn.user_id,
+      station_id: txn.station_id,
+      pump_id: txn.pump_id,
+      fuel_type_id: txn.fuel_type_id,
       authorized_litres: txn.authorized_litres,
       authorized_amount: txn.authorized_amount,
       price_per_litre: txn.price_per_litre,

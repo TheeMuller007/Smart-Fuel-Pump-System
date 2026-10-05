@@ -23,6 +23,9 @@ Usage:
     --pump-id <pump uuid> \
     --rate 1.5 --poll-interval 2
 
+Dependency-free: uses only the Python standard library (urllib), so it runs
+on any machine with Python 3 — no `pip install` step.
+
 Exit codes: 0 clean run (Ctrl+C), 1 configuration error, 2 unrecoverable.
 """
 
@@ -30,11 +33,30 @@ import argparse
 import hashlib
 import hmac
 import json
+import ssl
 import sys
 import time
+import urllib.error
+import urllib.request
 import uuid
 
-import requests
+# Line-buffered output even when piped (the e2e orchestrator captures stdout).
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except AttributeError:
+    pass
+
+
+class HttpResult:
+    """Minimal stand-in for a requests.Response."""
+
+    def __init__(self, status, text):
+        self.status_code = status
+        self.text = text
+
+    def json(self):
+        return json.loads(self.text)
 
 
 class PumpMock:
@@ -47,39 +69,53 @@ class PumpMock:
         self.poll_interval = poll_interval
         self.status_interval = status_interval
         self.verify = verify      # TLS verification flag
-        self.session = requests.Session()
-        self.session.headers["x-api-key"] = api_key
+        if not verify:
+            # Dev-only escape hatch for self-signed certificates.
+            self.ssl_context = ssl.create_default_context()
+            self.ssl_context.check_hostname = False
+            self.ssl_context.verify_mode = ssl.CERT_NONE
+        else:
+            self.ssl_context = None
 
         self.txn = None           # authorization currently being dispensed
         self.dispensed = 0.0
+        self.last_tick = None     # timestamp of the previous loop iteration
 
     # ---- HTTP ------------------------------------------------------------------
     def _url(self, path):
         return f"{self.base_url}/api/esp32{path}"
 
-    def get_authorization(self):
+    def _request(self, method, url, body=None, timeout=5):
+        """Stdlib-only HTTP request. Returns HttpResult or None on transport error."""
+        data = None
+        headers = {"x-api-key": self.api_key}
+        if body is not None:
+            data = json.dumps(body).encode()
+            headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
-            r = self.session.get(
-                self._url(f"/authorizations/{self.pump_id}"),
-                timeout=5,
-                verify=self.verify,
-            )
-        except requests.RequestException as exc:
-            print(f"[poll] connection error: {exc}")
+            with urllib.request.urlopen(req, timeout=timeout, context=self.ssl_context) as resp:
+                return HttpResult(resp.status, resp.read().decode())
+        except urllib.error.HTTPError as exc:  # 4xx/5xx still carries a body
+            return HttpResult(exc.code, exc.read().decode(errors="replace"))
+        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+            print(f"[{method.lower()}] connection error: {exc}")
+            return None
+
+    def get_authorization(self):
+        r = self._request("GET", self._url(f"/authorizations/{self.pump_id}"))
+        if r is None:
             return None
         if r.status_code != 200:
             print(f"[poll] HTTP {r.status_code}: {r.text[:120]}")
             return None
-        return r.json().get("authorization")
+        return json.loads(r.text).get("authorization")
 
     def post_status(self, pump_state, error=None):
         body = {"current_litres": round(self.dispensed, 3), "pump_state": pump_state}
         if error:
             body["error"] = error
-        try:
-            self.session.post(self._url(f"/status/{self.pump_id}"), json=body, timeout=5, verify=self.verify)
-        except requests.RequestException as exc:
-            print(f"[status] connection error: {exc}")
+        self._request("POST", self._url(f"/status/{self.pump_id}"), body=body)
 
     def post_ack(self):
         body = {
@@ -87,25 +123,19 @@ class PumpMock:
             "actual_litres": round(self.dispensed, 3),
             "device_signature": self.txn["signature"],
         }
-        try:
-            r = self.session.post(
-                self._url(f"/authorizations/{self.pump_id}/ack"),
-                json=body,
-                timeout=8,
-                verify=self.verify,
-            )
-        except requests.RequestException as exc:
-            print(f"[ack] connection error (will retry): {exc}")
+        r = self._request("POST", self._url(f"/authorizations/{self.pump_id}/ack"), body=body, timeout=8)
+        if r is None:
+            print("[ack] connection error (will retry)")
             return False
         if r.status_code == 200:
-            data = r.json()
+            data = json.loads(r.text)
             print(
                 f"[ack] settled {data.get('transaction_reference')}: "
                 f"final {data.get('final_amount')}, refund {data.get('refund_amount')}"
             )
             return True
         print(f"[ack] HTTP {r.status_code}: {r.text[:160]}")
-        # 4xx (other than transient 5xx) means the server rejected this ack
+        # 5xx means transient — retry; 4xx means the server rejected this ack
         # permanently — drop the txn so we don't loop forever.
         return 500 <= r.status_code < 600
 
@@ -139,11 +169,19 @@ class PumpMock:
                         else:
                             self.txn = auth
                             self.dispensed = 0.0
+                            self.last_tick = now
                             litres = float(auth["authorized_litres"])
                             print(f"[pump] START {auth['transaction_reference']} for {litres} L")
                             self.post_status("DISPENSING")
             else:
-                self.dispensed = min(self.dispensed + self.rate * (now - last_status if last_status else self.rate), float(self.txn["authorized_litres"]))
+                if self.last_tick is None:
+                    self.last_tick = now
+                elapsed = now - self.last_tick
+                self.last_tick = now
+                self.dispensed = min(
+                    self.dispensed + self.rate * elapsed,
+                    float(self.txn["authorized_litres"]),
+                )
                 if now - last_status >= self.status_interval or self.dispensed >= float(self.txn["authorized_litres"]):
                     last_status = now
                     done = self.dispensed >= float(self.txn["authorized_litres"])
@@ -152,6 +190,7 @@ class PumpMock:
                         if self.post_ack():
                             self.txn = None
                             self.dispensed = 0.0
+                            self.last_tick = None
 
             time.sleep(0.2)
 

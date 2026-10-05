@@ -1,1 +1,2 @@
-requests>=2.31
+# The pump mock uses only the Python standard library (urllib) — no installs needed.
+# This file is kept so `pip install -r requirements.txt` (docker-compose mock) is a no-op.

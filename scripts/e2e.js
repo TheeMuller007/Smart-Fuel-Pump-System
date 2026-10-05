@@ -18,14 +18,16 @@
  *   node scripts/e2e.js [--db-url postgresql://...] [--port 4100] [--skip-migrate]
  *
  * Prerequisites:
- *   - A reachable PostgreSQL test database (default smart_fuel_test on :5432,
+ *   - A reachable PostgreSQL test database (default smart_fuel_test on :5433
+ *     to match docker-compose; pass --db-url to override)
  *     compose credentials). Create it once, e.g.:
  *       docker compose up -d db
  *       docker exec smart-fuel-db psql -U postgres -c 'CREATE DATABASE smart_fuel_test;'
- *   - Python 3 with `requests` for the pump mock (pip install -r esp32-mock/requirements.txt)
+ *   - Python 3 for the pump mock (stdlib only — no pip installs needed)
  */
 
-const { spawn, execSync } = require('child_process');
+const { spawn, execSync, execFileSync } = require('child_process');
+const fs = require('fs');
 const path = require('path');
 
 // ---- CLI ---------------------------------------------------------------------
@@ -38,7 +40,23 @@ const hasFlag = (name) => args.includes(name);
 
 const PORT = Number(argValue('--port', '4100'));
 const BASE = `http://localhost:${PORT}`;
-const DB_URL = argValue('--db-url', process.env.E2E_DATABASE_URL || 'postgresql://postgres:password@localhost:5432/smart_fuel_test');
+require('dotenv').config();
+
+/**
+ * Test DB URL resolution order:
+ *   1. --db-url flag
+ *   2. E2E_DATABASE_URL env var
+ *   3. Derived from DATABASE_URL in .env (same server, database smart_fuel_test)
+ *   4. Last-resort default
+ */
+function resolveDbUrl() {
+  const explicit = argValue('--db-url', process.env.E2E_DATABASE_URL);
+  if (explicit) return explicit;
+  const base = (process.env.DATABASE_URL || 'postgresql://postgres:password@127.0.0.1:5433/smart_fuel_db')
+    .replace('@localhost:', '@127.0.0.1:'); // Prisma's IPv6-first resolution fails on some Windows hosts
+  return base.replace(/\/[?]?[^/?]*(\?|$)/, '/smart_fuel_test$1');
+}
+const DB_URL = resolveDbUrl();
 const ESP32_API_KEY = 'itest-device-api-key-0123456789abcdef';
 const DEVICE_SIGNING_SECRET = 'itest-device-signing-secret-0123456789';
 const REQUESTED_LITRES = 10;
@@ -200,6 +218,33 @@ async function main() {
           env: serverEnv, stdio: 'pipe', cwd: path.join(__dirname, '..'), timeout: 120000,
         });
         ok('schema applied (prisma db push)');
+
+        // Reset leftover state from earlier runs — the test DB is throwaway.
+        // (Skipped with --skip-migrate, which means "leave my data alone".)
+        try {
+          const pgBins = [
+            process.env.PGBIN,
+            'C:\\Program Files\\PostgreSQL\\17\\bin',
+            'C:\\Program Files\\PostgreSQL\\16\\bin',
+            'C:\\Program Files\\PostgreSQL\\15\\bin',
+          ].filter(Boolean);
+          const psql = pgBins.map((d) => path.join(d, 'psql.exe')).find((p) => fs.existsSync(p));
+          if (!psql) throw new Error('psql.exe not found');
+          // psql doesn't understand Prisma's "?schema=" URL parameter — strip it.
+          const psqlUrl = DB_URL.split('?')[0];
+          execFileSync(
+            psql,
+            [
+              psqlUrl,
+              '-c',
+              "DO $$ DECLARE r RECORD; BEGIN FOR r IN (SELECT tablename FROM pg_tables WHERE schemaname='public') LOOP EXECUTE 'TRUNCATE TABLE public.' || quote_ident(r.tablename) || ' CASCADE'; END LOOP; END $$;",
+            ],
+            { stdio: 'pipe', timeout: 30000 },
+          );
+          ok('test database reset (all tables truncated)');
+        } catch (e) {
+          console.log(`  ⚠ could not reset the test database (${String(e.message).split('\n')[0].slice(0, 160)}) — reusing existing data`);
+        }
       } catch (e) {
         console.error(String(e.stderr || e.message).slice(0, 600));
         throw new Error(
