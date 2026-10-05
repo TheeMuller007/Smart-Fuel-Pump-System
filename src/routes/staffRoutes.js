@@ -96,7 +96,7 @@ router.post('/requests/:id/assign-pump', async (req, res, next) => {
       action: 'ASSIGN_PUMP',
       entityType: 'fuel_request',
       entityId: req.params.id,
-      description: `Assigned pump ${request.pump_id} to request ${request.request_reference}`,
+      description: `Assigned pump #${(request.pump && request.pump.pump_number) || request.pump_id} to request ${request.request_reference}`,
       ipAddress: req.ip,
     });
     res.json(request);

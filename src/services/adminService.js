@@ -252,7 +252,16 @@ async function listStationUsers(stationId) {
   return prisma.stationUser.findMany({
     where,
     orderBy: { created_at: 'asc' },
-    include: { station: { select: { name: true } } },
+    select: {  // never leak password hashes to the admin UI
+      id: true,
+      username: true,
+      full_name: true,
+      role: true,
+      status: true,
+      station_id: true,
+      created_at: true,
+      station: { select: { name: true } },
+    },
   });
 }
 
@@ -350,26 +359,81 @@ async function listAuditLogs({ page = 1, limit = 25, action = '', entity_type = 
     }),
     prisma.auditLog.count({ where }),
   ]);
-  return { items, total, page: pageNum, total_pages: Math.max(Math.ceil(total / take), 1) };
+  return {
+    items: items.map((l) => ({
+      ...l,
+      actor_name: (l.stationUser && (l.stationUser.full_name || l.stationUser.username)) ||
+        (l.user && (l.user.full_name || l.user.email)) || null,
+    })),
+    total,
+    page: pageNum,
+    total_pages: Math.max(Math.ceil(total / take), 1),
+  };
+}
+
+/** Latest fuel requests across all stations for the admin dashboard feed. */
+async function recentFuelRequests(limit = 10) {
+  return prisma.fuelRequest.findMany({
+    orderBy: { created_at: 'desc' },
+    take: Math.min(Math.max(Number(limit) || 10, 1), 50),
+    include: {
+      user: { select: { full_name: true } },
+      fuel_type: { select: { name: true } },
+      station: { select: { name: true } },
+      pump: { select: { pump_number: true } },
+    },
+  });
 }
 
 /** Dashboard cards: sales, active pumps, recent audit entries. */
 async function getDashboard() {
-  const [totalSales, txnCount, activePumps, customerCount, stationCount, recentLogs] = await Promise.all([
+  const startOfToday = new Date();
+  startOfToday.setHours(0, 0, 0, 0);
+
+  const [totalSales, txnCount, activePumps, customerCount, stationCount, todayRequests, todayLitres, todayRevenue, recentLogs] = await Promise.all([
     prisma.fuelTransaction.aggregate({ _sum: { final_amount: true }, where: { status: 'COMPLETED' } }),
     prisma.fuelTransaction.count({ where: { status: 'COMPLETED' } }),
     prisma.pump.count({ where: { status: { in: ['AVAILABLE', 'RESERVED', 'BUSY'] } } }),
     prisma.user.count(),
     prisma.station.count({ where: { status: 'ACTIVE' } }),
-    prisma.auditLog.findMany({ orderBy: { created_at: 'desc' }, take: 8, include: { station: { select: { name: true } } } }),
+    prisma.fuelRequest.count({ where: { created_at: { gte: startOfToday } } }),
+    prisma.fuelTransaction.aggregate({
+      _sum: { actual_litres: true },
+      where: { status: 'COMPLETED', completed_at: { gte: startOfToday } },
+    }),
+    prisma.fuelTransaction.aggregate({
+      _sum: { final_amount: true },
+      where: { status: 'COMPLETED', completed_at: { gte: startOfToday } },
+    }),
+    prisma.auditLog.findMany({
+      orderBy: { created_at: 'desc' },
+      take: 8,
+      include: {
+        station: { select: { name: true } },
+        user: { select: { full_name: true, email: true } },
+        stationUser: { select: { full_name: true, username: true } },
+      },
+    }),
   ]);
   return {
+    // Today-scoped cards (what a station operator actually watches).
+    requests_today: todayRequests,
+    litres_today: todayLitres._sum.actual_litres || 0,
+    revenue_today: todayRevenue._sum.final_amount || 0,
+    // All-time cards + compatibility aliases.
+    customers: customerCount,
+    stations: stationCount,
+    pumps_active: activePumps,
     total_sales: totalSales._sum.final_amount || 0,
     completed_transactions: txnCount,
-    active_pumps: activePumps,
-    customers: customerCount,
     active_stations: stationCount,
-    recent_audit: recentLogs,
+    active_pumps: activePumps,
+    recent_audit: recentLogs.map((l) => ({
+      ...l,
+      actor_name: (l.stationUser && (l.stationUser.full_name || l.stationUser.username)) ||
+        (l.user && (l.user.full_name || l.user.email)) || null,
+    })),
+    recent_requests: await recentFuelRequests(8),
   };
 }
 
@@ -392,5 +456,6 @@ module.exports = {
   updateStationUser,
   listAuditLogs,
   getDashboard,
+  recentFuelRequests,
   AdminError,
 };

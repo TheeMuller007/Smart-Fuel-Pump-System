@@ -372,8 +372,8 @@ async function assignPump(requestId, staff, pump_id) {
       where: { id: request.id },
       data: { pump_id },
     });
-    await tx.pump.update({ where: { id: pump_id }, data: { status: 'RESERVED' } });
-    return updated;
+    const reservedPump = await tx.pump.update({ where: { id: pump_id }, data: { status: 'RESERVED' } });
+    return { ...updated, pump: { pump_number: reservedPump.pump_number } };
   });
 }
 

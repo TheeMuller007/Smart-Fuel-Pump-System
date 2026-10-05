@@ -458,7 +458,8 @@
           '<td>' + Number(t.authorized_litres).toFixed(3) + ' L / ' + money(t.authorized_amount) + '</td>' +
           '<td>' + (t.actual_litres ? Number(t.actual_litres).toFixed(3) + ' L' : '—') + '</td>' +
           '<td>' + (t.final_amount != null ? money(t.final_amount) : '—') + '</td><td>' + badge(t.status) + '</td>' +
-          '<td>' + (t.status === 'AUTHORIZED' ? '<span class="row"><input class="small actual" style="width:90px" type="number" step="0.001" min="0.001" max="' + Number(t.authorized_litres) + '" placeholder="litres" data-txn="' + t.id + '" /><button class="small primary" data-done="' + t.id + '">Complete</button></span>' : '') + '</td></tr>'
+          '<td>' + (t.status === 'AUTHORIZED' ? '<span class="row"><input class="small actual" style="width:90px" type="number" step="0.001" min="0.001" max="' + Number(t.authorized_litres) + '" placeholder="litres" data-txn="' + t.id + '" /><button class="small primary" data-done="' + t.id + '">Complete</button></span>' :
+            t.status === 'COMPLETED' ? '<a class="small" href="#/receipt/' + t.id + '"><button class="small">Receipt</button></a>' : '') + '</td></tr>'
         ).join('') + '</tbody></table>') + '</div>';
 
     root.querySelectorAll('[data-assign]').forEach((btn) => {
@@ -591,7 +592,7 @@
           '<div class="card"><table><thead><tr><th>Name</th><th>Price / litre</th><th>Currency</th><th>Status</th><th></th></tr></thead><tbody>' +
           list.map((f) =>
             '<tr><td><input data-name="' + f.id + '" value="' + esc(f.name) + '" /></td>' +
-            '<td><input style="width:130px" type="number" step="0.001" min="0.001" data-price="' + f.id + '" value="' + Number(f.price_per_litre) + '" /></td>' +
+            '<td><input style="width:130px" type="number" step="0.001" min="0.001" data-price="' + f.id + '" value="' + Number(f.price_per_litre).toFixed(3) + '" /></td>' +
             '<td>' + esc(f.currency) + '</td><td>' + badge(f.status) + '</td>' +
             '<td><button class="small primary" data-save="' + f.id + '">Save</button> ' +
             '<button class="small danger" data-del="' + f.id + '">Delete</button></td></tr>'
@@ -646,17 +647,28 @@
     catch (e) { root.innerHTML = '<div class="error-box">' + esc(e.message) + '</div>'; return; }
 
     const card = (label, value, cls) => '<div class="stat ' + (cls || '') + '"><div class="label">' + esc(label) + '</div><div class="value">' + value + '</div></div>';
+    const recent = Array.isArray(d.recent_requests) ? d.recent_requests : [];
     root.innerHTML =
       '<div class="stats-row">' +
       card('Customers', d.customers) +
       card('Stations', d.stations) +
       card('Pumps active', d.pumps_active) +
       card('Requests today', d.requests_today) +
-      card('Litres sold today', Number(d.litres_today).toFixed(2)) +
-      card('Revenue today', money(d.revenue_today) + ' ' + CURRENCY) +
+      card('Litres sold today', Number(d.litres_today || 0).toFixed(2)) +
+      card('Revenue today', money(d.revenue_today || 0) + ' ' + CURRENCY) +
       '</div>' +
+      '<div class="card"><h3>Recent requests</h3>' +
+      (recent.length === 0 ? '<p class="muted">No requests yet.</p>' :
+        '<table><thead><tr><th>When</th><th>Reference</th><th>Customer</th><th>Station</th><th>Fuel</th><th>Amount</th><th>Status</th></tr></thead><tbody>' +
+        recent.map((r) =>
+          '<tr><td>' + new Date(r.created_at).toLocaleString() + '</td><td>' + ref(r.request_reference) + '</td>' +
+          '<td>' + esc(r.user ? r.user.full_name : '—') + '</td><td>' + esc(r.station ? r.station.name : '—') + '</td>' +
+          '<td>' + esc(r.fuel_type ? r.fuel_type.name : '—') + (r.pump ? ' · P' + r.pump.pump_number : '') + '</td>' +
+          '<td>' + Number(r.requested_litres).toFixed(3) + ' L / ' + money(r.requested_amount) + '</td>' +
+          '<td>' + badge(r.status) + '</td></tr>'
+        ).join('') + '</tbody></table>') + '</div>' +
       '<div class="card"><h3>Recent audit activity</h3>' +
-      (d.recent_audit.length === 0 ? '<p class="muted">No audit entries yet.</p>' :
+      ((d.recent_audit || []).length === 0 ? '<p class="muted">No audit entries yet.</p>' :
         '<table><thead><tr><th>When</th><th>Actor</th><th>Action</th><th>Entity</th><th>Detail</th></tr></thead><tbody>' +
         d.recent_audit.map((l) =>
           '<tr><td>' + new Date(l.created_at).toLocaleString() + '</td><td>' + esc(l.actor_name || l.actor_type || 'system') + '</td>' +
@@ -670,10 +682,28 @@
     closeSse();
     app.innerHTML = '<h2>Users &amp; staff</h2><div id="u"><p class="muted">Loading…</p></div>';
     const root = document.getElementById('u');
+    const blockBtns = (scopeSel) => {
+      root.querySelectorAll(scopeSel + ' [data-block]').forEach((b) => {
+        b.onclick = async () => {
+          try { await api('/api/admin/users/' + b.getAttribute('data-block') + '/status', { method: 'PATCH', body: JSON.stringify({ status: 'BLOCKED' }) }); load(); }
+          catch (e) { alert(e.message); }
+        };
+      });
+      root.querySelectorAll(scopeSel + ' [data-unblock]').forEach((b) => {
+        b.onclick = async () => {
+          try { await api('/api/admin/users/' + b.getAttribute('data-unblock') + '/status', { method: 'PATCH', body: JSON.stringify({ status: 'ACTIVE' }) }); load(); }
+          catch (e) { alert(e.message); }
+        };
+      });
+    };
     const load = async () => {
       try {
-        const data = await api('/api/admin/users?limit=100');
+        const [data, staff] = await Promise.all([
+          api('/api/admin/users?limit=100'),
+          api('/api/admin/staff'),
+        ]);
         const rows = data.items || data;
+        const staffRows = staff.items || staff;
         root.innerHTML =
           '<div class="card"><table><thead><tr><th>Name</th><th>Contact</th><th>Role</th><th>Status</th><th>Wallet</th><th></th></tr></thead><tbody>' +
           rows.map((u) =>
@@ -683,20 +713,21 @@
             '<td>' + (u.status === 'BLOCKED'
               ? '<button class="small success" data-unblock="' + u.id + '">Unblock</button>'
               : '<button class="small danger" data-block="' + u.id + '">Block</button>') + '</td></tr>'
-          ).join('') + '</tbody></table><p class="muted">Blocked accounts cannot sign in; their wallets and history are preserved.</p></div>';
-        root.querySelectorAll('[data-block]').forEach((b) => {
-          b.onclick = async () => {
-            try { await api('/api/admin/users/' + b.getAttribute('data-block') + '/status', { method: 'PATCH', body: JSON.stringify({ status: 'BLOCKED' }) }); load(); }
-            catch (e) { alert(e.message); }
-          };
-        });
-        root.querySelectorAll('[data-unblock]').forEach((b) => {
-          b.onclick = async () => {
-            try { await api('/api/admin/users/' + b.getAttribute('data-unblock') + '/status', { method: 'PATCH', body: JSON.stringify({ status: 'ACTIVE' }) }); load(); }
-            catch (e) { alert(e.message); }
-          };
-        });
-      } catch (e) { root.innerHTML = '<div class="error-box">' + esc(e.message) + '</div>'; }
+          ).join('') + '</tbody></table><p class="muted">Blocked accounts cannot sign in; their wallets and history are preserved.</p></div>' +
+          '<div class="card"><h3>Station staff</h3>' +
+          (staffRows.length === 0 ? '<p class="muted">No staff accounts yet.</p>' :
+            '<table><thead><tr><th>Name</th><th>Username</th><th>Role</th><th>Status</th><th></th><th></th></tr></thead><tbody>' +
+            staffRows.map((s) =>
+              '<tr><td>' + esc(s.full_name || s.username) + '</td><td class="mono muted">' + esc(s.username) + '</td>' +
+              '<td>' + badge(s.role) + '</td><td>' + badge(s.status || 'ACTIVE') + '</td>' +
+              '<td class="muted">' + esc((s.station && s.station.name) || '') + '</td>' +
+              '<td>' + (s.status === 'BLOCKED'
+                ? '<button class="small success" data-unblock="' + s.id + '">Unblock</button>'
+                : '<button class="small danger" data-block="' + s.id + '">Block</button>') + '</td></tr>'
+            ).join('') + '</tbody></table>') + '</div>';
+        blockBtns('.card:first-of-type');
+        blockBtns('.card:nth-of-type(2)');
+      } catch (e) { root.innerHTML = '<div class="error-box">' + esc(e.message); + '</div>'; }
     };
     load();
   }

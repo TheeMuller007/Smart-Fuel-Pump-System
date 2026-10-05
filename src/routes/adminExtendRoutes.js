@@ -141,4 +141,16 @@ router.get('/audit-logs', async (req, res, next) => {
   }
 });
 
+// ---- Recent requests feed (admin dashboard) ------------------------------------
+// GET /api/admin/fuel-requests?limit=10 — latest requests across all stations
+router.get('/fuel-requests', async (req, res, next) => {
+  try {
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 10, 1), 50);
+    const requests = await adminService.recentFuelRequests(limit);
+    res.json(requests);
+  } catch (error) {
+    next(error);
+  }
+});
+
 module.exports = router;
