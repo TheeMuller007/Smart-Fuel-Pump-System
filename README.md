@@ -289,6 +289,35 @@ npm test        # mocha unit tests (wallet ledger, auth) + ledger/signature self
 npm run lint    # eslint
 ```
 
+### End-to-end integration test
+
+`npm run test:e2e` boots the real server against a **test database**, seeds it, spawns the
+Python pump mock, and drives the full prepaid loop over HTTP with assertions at every step:
+
+> customer login → create request (reserve) → staff assign pump → authorize →
+> **mock dispenses** (signature-verified, with telemetry) → wallet settles →
+> ledger rows verified → **receipt PDF downloaded** (incl. anonymous signed-link check)
+
+One-time setup — create a dedicated test database (never points at your dev data):
+
+```bash
+docker compose up -d db
+docker exec smart-fuel-db psql -U postgres -c "CREATE DATABASE smart_fuel_test;"
+```
+
+Then run it:
+
+```bash
+npm run test:e2e                          # uses postgresql://postgres:password@localhost:5432/smart_fuel_test
+npm run test:e2e -- --db-url postgresql://user:pass@host:5432/other  # custom database
+npm run test:e2e -- --port 4200           # different API port
+npm run test:e2e -- --skip-migrate        # schema already applied
+```
+
+The script requires Node 20+ (native fetch) and Python 3 with `requests` for the mock.
+Exit code 0 = the whole dispensing loop works end to end; any failed assertion exits non-zero
+and dumps the tail of the server/mock logs.
+
 Security posture: bcrypt-only password hashing, JWT access (15 m) + rotating refresh tokens
 (7 d, hashed at rest, revoked on logout), role-scoped endpoints, helmet headers, rate-limited
 API, constant-time device API-key comparison, HMAC-signed device payloads, receipt URLs with
