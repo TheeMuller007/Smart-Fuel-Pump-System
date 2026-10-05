@@ -1,0 +1,34 @@
+// ESP32 Pump Controller — configuration template
+// Copy this file to config.h and fill in your values. config.h is gitignored.
+
+// ---- Wi-Fi ------------------------------------------------------------------
+const char* WIFI_SSID     = "your-wifi-ssid";
+const char* WIFI_PASSWORD = "your-wifi-password";
+
+// ---- Server -----------------------------------------------------------------
+// Use http while prototyping on a LAN; switch to https:// with a real
+// certificate once exposed beyond the local network (stage 13 hardening).
+const char* SERVER_HOST   = "192.168.1.50";  // machine running the backend
+const uint16_t SERVER_PORT = 4000;
+const bool SERVER_USE_TLS  = false;          // true → HTTPS (port 443 typical)
+const char* SERVER_FINGERPRINT = "";         // optional: SHA-1 cert pin
+
+// ---- Device credentials (must match the server .env) --------------------------
+const char* DEVICE_API_KEY      = "replace-with-ESP32_API_KEY";
+const char* DEVICE_SIGNING_SECRET = "replace-with-DEVICE_SIGNING_SECRET";
+const char* PUMP_ID             = "paste-pump-uuid-here";
+
+// ---- Hardware pins -------------------------------------------------------------
+const int RELAY_PIN        = 26;   // relay module IN (HIGH = pump ON)
+const int FLOW_SENSOR_PIN  = 27;   // YF-S401 flow sensor pulse output
+const int STATUS_LED_PIN   = 2;    // onboard LED
+
+// ---- Flow calibration ------------------------------------------------------------
+// Pulses per litre for your flow sensor (YF-S401 ≈ 450, YF-S201 ≈ 450 too).
+const float PULSES_PER_LITRE = 450.0f;
+
+// ---- Timings -----------------------------------------------------------------------
+const unsigned long POLL_INTERVAL_MS      = 3000;   // authorization polling
+const unsigned long STATUS_INTERVAL_MS    = 2000;   // telemetry POST cadence
+const unsigned long NO_FLOW_TIMEOUT_MS    = 10000;  // relay open, zero pulses → fault
+const unsigned long DISPENSE_TIMEOUT_MS   = 600000; // hard cap per dispense (10 min)

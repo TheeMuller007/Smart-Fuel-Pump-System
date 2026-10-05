@@ -480,6 +480,231 @@ paths:
                   deleted: { type: boolean }
                   deactivated: { type: boolean }
                   message: { type: string }
+  /transactions/{id}:
+    get:
+      tags: [Wallet]
+      summary: Full transaction detail incl. receipt URL when completed
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Transaction with receipt_url }
+        '403': { description: Not your transaction / another station }
+        '404': { description: Not found }
+  /stream/pumps/{pump_id}:
+    get:
+      tags: [Stream]
+      summary: SSE — live dispensing telemetry for one pump
+      description: >-
+        Events: hello, pump_status (device telemetry), pump_transaction
+        (authorized transaction snapshot). Customers may only watch a pump
+        currently dispensing for them; staff any pump at their station.
+      parameters:
+        - { in: path, name: pump_id, required: true, schema: { type: string } }
+      responses:
+        '200': { description: text/event-stream }
+        '403': { description: Not allowed to watch this pump }
+  /stream/station:
+    get:
+      tags: [Stream]
+      summary: SSE — every pump at the caller's station (staff)
+      responses:
+        '200': { description: text/event-stream }
+  /stream/me:
+    get:
+      tags: [Stream]
+      summary: SSE — customer stream (wallet, requests, dispensing, receipts)
+      responses:
+        '200': { description: text/event-stream }
+        '403': { description: Customer token required }
+  /esp32/authorizations/{pump_id}/status:
+    post:
+      tags: [Device]
+      summary: ESP32 periodic telemetry {current_litres, pump_state, error?}
+      parameters:
+        - { in: path, name: pump_id, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                current_litres: { type: number }
+                pump_state: { type: string, example: DISPENSING }
+                error: { type: string }
+      responses:
+        '200': { description: '{status: ok}' }
+        '404': { description: Pump not found }
+  /esp32/authorizations/{pump_id}/completed:
+    post:
+      tags: [Device]
+      summary: ESP32 final report — settles wallet, frees pump, triggers receipt
+      parameters:
+        - { in: path, name: pump_id, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [actual_litres]
+              properties:
+                actual_litres: { type: number }
+      responses:
+        '200': { description: Completed transaction + receipt_url }
+        '400': { description: No AUTHORIZED transaction on this pump }
+  /admin/dashboard:
+    get:
+      tags: [Admin]
+      summary: Dashboard cards (counts, litres and revenue today, recent audit)
+      responses:
+        '200': { description: Dashboard summary }
+  /admin/users:
+    get:
+      tags: [Admin]
+      summary: Paginated user list with search/status filters
+      parameters:
+        - { in: query, name: q, schema: { type: string } }
+        - { in: query, name: status, schema: { type: string, enum: [ACTIVE, BLOCKED] } }
+        - { in: query, name: page, schema: { type: integer } }
+        - { in: query, name: limit, schema: { type: integer } }
+      responses:
+        '200': { description: '{items, page, total_pages, total}' }
+  /admin/users/{id}/status:
+    patch:
+      tags: [Admin]
+      summary: Block or unblock an account
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [ACTIVE, BLOCKED] }
+      responses:
+        '200': { description: Updated user }
+  /admin/stations:
+    get:
+      tags: [Admin]
+      summary: List stations with pump counts
+      responses:
+        '200': { description: Station list }
+    post:
+      tags: [Admin]
+      summary: Create a station
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                location: { type: string }
+      responses:
+        '201': { description: Created }
+  /admin/stations/{id}:
+    patch:
+      tags: [Admin]
+      summary: Update station name/location
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Updated }
+  /admin/pumps:
+    get:
+      tags: [Admin]
+      summary: List pumps (optionally by station)
+      parameters:
+        - { in: query, name: station_id, schema: { type: string } }
+      responses:
+        '200': { description: Pump list }
+    post:
+      tags: [Admin]
+      summary: Register a pump controller
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [station_id, pump_number, fuel_type_id]
+              properties:
+                station_id: { type: string }
+                pump_number: { type: integer }
+                fuel_type_id: { type: string }
+                controller_id: { type: string }
+      responses:
+        '201': { description: Created }
+  /admin/pumps/{id}:
+    patch:
+      tags: [Admin]
+      summary: Update pump fuel type / controller / status
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Updated }
+    delete:
+      tags: [Admin]
+      summary: Delete pump (or OFFLINE when history exists)
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Deleted or deactivated }
+  /admin/staff:
+    get:
+      tags: [Admin]
+      summary: List station staff accounts
+      parameters:
+        - { in: query, name: station_id, schema: { type: string } }
+      responses:
+        '200': { description: Staff list }
+    post:
+      tags: [Admin]
+      summary: Create a staff account
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [station_id, username, password, role]
+              properties:
+                station_id: { type: string }
+                username: { type: string }
+                password: { type: string }
+                full_name: { type: string }
+                role: { type: string, enum: [ATTENDANT, MANAGER, ADMIN] }
+      responses:
+        '201': { description: Created }
+  /admin/staff/{id}:
+    patch:
+      tags: [Admin]
+      summary: Update staff name/role/status/password
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Updated }
+  /admin/audit-logs:
+    get:
+      tags: [Admin]
+      summary: Paginated audit trail with filters
+      parameters:
+        - { in: query, name: action, schema: { type: string } }
+        - { in: query, name: entity_type, schema: { type: string } }
+        - { in: query, name: user_id, schema: { type: string } }
+        - { in: query, name: station_id, schema: { type: string } }
+        - { in: query, name: from, schema: { type: string, format: date } }
+        - { in: query, name: to, schema: { type: string, format: date } }
+        - { in: query, name: page, schema: { type: integer } }
+        - { in: query, name: limit, schema: { type: integer } }
+      responses:
+        '200': { description: '{items, page, total_pages, total}' }
   /health:
     get:
       tags: [Auth]

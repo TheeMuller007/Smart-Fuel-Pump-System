@@ -55,6 +55,66 @@
   const money = (v) => Number(v ?? 0).toFixed(2);
   const ref = (r) => '<span class="mono">' + esc(r || '-') + '</span>';
   const badge = (s) => '<span class="badge ' + esc(s) + '">' + esc(s) + '</span>';
+  const CURRENCY = 'USD';
+
+  // ---------------- SSE (live pump progress) ----------------
+
+  const sseConnections = [];
+  function closeSse() {
+    while (sseConnections.length) { try { sseConnections.pop().close(); } catch { /* ignore */ } }
+  }
+
+  /** Subscribe to an authenticated SSE endpoint; auto-reconnects with a fresh token. */
+  function subscribeSse(path, handlers) {
+    const connect = () => {
+      const es = new EventSource(path + '?token=' + encodeURIComponent(state.token));
+      sseConnections.push(es);
+      for (const [event, fn] of Object.entries(handlers)) {
+        es.addEventListener(event, (e) => { try { fn(JSON.parse(e.data)); } catch { /* ignore */ } });
+      }
+      es.onerror = () => {
+        es.close();
+        const i = sseConnections.indexOf(es);
+        if (i !== -1) sseConnections.splice(i, 1);
+        if (document.body.contains(app)) setTimeout(connect, 5000);
+      };
+      return es;
+    };
+    return connect();
+  }
+
+  /**
+   * Live dispensing panel: subscribes to the pump stream and renders a
+   * progress bar, current litres and pump ON/OFF indicator.
+   */
+  function pumpProgress(txn, onDone) {
+    const wrap = document.createElement('div');
+    wrap.className = 'card pump-live';
+    const render = (d) => {
+      const authorized = Number(d.authorized_litres || txn.authorized_litres);
+      const current = Number(d.current_litres || 0);
+      const pct = authorized > 0 ? Math.min(100, (current / authorized) * 100) : 0;
+      const on = d.pump_state === 'DISPENSING' || d.pump_state === 'ON';
+      wrap.innerHTML =
+        '<h3>⛽ Live dispensing — ' + esc(d.fuel_type || txn.fuel_type?.name || '') + '</h3>' +
+        '<div class="live-head"><span class="pump-state ' + (on ? 'on' : 'off') + '">' + (on ? '● PUMP ON' : '○ PUMP OFF') + '</span>' +
+        '<span class="mono">' + esc(d.transaction_reference || txn.transaction_reference || '') + '</span></div>' +
+        '<div class="progress"><div class="fill" style="width:' + pct.toFixed(1) + '%"></div></div>' +
+        '<div class="live-nums"><b>' + current.toFixed(3) + '</b> / ' + authorized.toFixed(3) + ' L' +
+        ' · est. ' + money(current * Number(d.price_per_litre || txn.price_per_litre)) + '</div>';
+    };
+    render({});
+    let done = false;
+    subscribeSse('/api/stream/pumps/' + txn.pump_id, {
+      pump_status: (d) => {
+        if (done) return;
+        render(d);
+        if (d.pump_state === 'COMPLETED' && !done) { done = true; onDone && onDone(); }
+      },
+      pump_transaction: (t) => render({ ...t, current_litres: 0, pump_state: 'ON' }),
+    });
+    return wrap;
+  }
 
   // ---------------- chrome ----------------
 
@@ -66,7 +126,7 @@
     } else if (user && (user.role === 'staff' || user.role === 'admin')) {
       links.push(['#/staff', 'Fuel Desk']);
       links.push(['#/staff-deposits', 'Cash Deposits']);
-      if (user.role === 'admin') links.push(['#/admin/fuel-types', 'Fuel Types']);
+      if (user.role === 'admin') links.push(['#/admin', 'Admin'], ['#/admin/fuel-types', 'Fuel Types']);
     }
     nav.innerHTML = links.map(([h, t]) => '<a href="' + h + '" data-h="' + h + '">' + t + '</a>').join('');
     if (user) {
@@ -166,12 +226,17 @@
 
   async function dashboardView() {
     if (!requireRole(['customer'])) return;
+    closeSse();
     app.innerHTML = '<h2>Dashboard</h2><div id="dash"><p class="muted">Loading…</p></div>';
     const root = document.getElementById('dash');
     let wallet, requests;
     try {
       [wallet, requests] = await Promise.all([api('/api/wallet'), api('/api/fuel-requests')]);
     } catch (e) { root.innerHTML = '<div class="error-box">' + esc(e.message) + '</div>'; return; }
+
+    // If any of the user's requests is being dispensed right now, show the
+    // live pump progress panel instead of the static summary.
+    const liveReq = requests.find((r) => r.status === 'AUTHORIZED' && r.pump_id) || null;
 
     root.innerHTML =
       '<div class="card"><h3>Wallet</h3><div class="balances">' +
@@ -180,7 +245,7 @@
       '</div><div class="row" style="margin-top:14px"><div><label>Deposit amount</label><input id="d-amt" type="number" min="1" step="0.01" placeholder="50.00" /></div>' +
       '<button class="success" id="d-go">Deposit cash</button></div><div id="d-msg"></div></div>' +
 
-      '<p class="muted">Need fuel? <a href="#/request-fuel">Open the Request Fuel page →</a></p>' +
+      (liveReq ? '<div id="live-slot"></div>' : '<p class="muted">Need fuel? <a href="#/request-fuel">Open the Request Fuel page →</a></p>') +
 
       '<div class="card"><h3>My requests</h3>' +
       (requests.length === 0 ? '<p class="muted">No requests yet.</p>' :
@@ -190,6 +255,17 @@
           '<td>' + Number(r.requested_litres).toFixed(3) + '</td><td>' + money(r.requested_amount) + '</td><td>' + badge(r.status) + '</td>' +
           '<td>' + (r.status === 'RESERVED' ? '<button class="small danger" data-cancel="' + r.id + '">Cancel</button>' : '') + '</td></tr>'
         ).join('') + '</tbody></table>') + '</div>';
+
+    if (liveReq) {
+      document.getElementById('live-slot').appendChild(
+        pumpProgress({
+          authorized_litres: liveReq.requested_litres,
+          price_per_litre: liveReq.price_per_litre,
+          fuel_type: liveReq.fuel_type.name,
+          pump_id: liveReq.pump_id,
+        }, () => { closeSse(); dashboardView(); })
+      );
+    }
 
     document.getElementById('d-go').onclick = async () => {
       const amt = document.getElementById('d-amt').value;
@@ -558,6 +634,142 @@
     load();
   }
 
+  // ---------------- admin dashboard (stage 12) ----------------
+
+  async function adminDashboardView() {
+    if (!requireRole(['admin'])) return;
+    closeSse();
+    app.innerHTML = '<h2>Admin dashboard</h2><div id="a"><p class="muted">Loading…</p></div>';
+    const root = document.getElementById('a');
+    let d;
+    try { d = await api('/api/admin/dashboard'); }
+    catch (e) { root.innerHTML = '<div class="error-box">' + esc(e.message) + '</div>'; return; }
+
+    const card = (label, value, cls) => '<div class="stat ' + (cls || '') + '"><div class="label">' + esc(label) + '</div><div class="value">' + value + '</div></div>';
+    root.innerHTML =
+      '<div class="stats-row">' +
+      card('Customers', d.customers) +
+      card('Stations', d.stations) +
+      card('Pumps active', d.pumps_active) +
+      card('Requests today', d.requests_today) +
+      card('Litres sold today', Number(d.litres_today).toFixed(2)) +
+      card('Revenue today', money(d.revenue_today) + ' ' + CURRENCY) +
+      '</div>' +
+      '<div class="card"><h3>Recent audit activity</h3>' +
+      (d.recent_audit.length === 0 ? '<p class="muted">No audit entries yet.</p>' :
+        '<table><thead><tr><th>When</th><th>Actor</th><th>Action</th><th>Entity</th><th>Detail</th></tr></thead><tbody>' +
+        d.recent_audit.map((l) =>
+          '<tr><td>' + new Date(l.created_at).toLocaleString() + '</td><td>' + esc(l.actor_name || l.actor_type || 'system') + '</td>' +
+          '<td>' + badge(l.action) + '</td><td>' + esc(l.entity_type) + '</td><td class="muted">' + esc(l.description || '') + '</td></tr>'
+        ).join('') + '</tbody></table>') + '</div>' +
+      '<p><a href="#/admin/users">Manage users →</a> · <a href="#/admin/audit-logs">Full audit log →</a></p>';
+  }
+
+  async function adminUsersView() {
+    if (!requireRole(['admin'])) return;
+    closeSse();
+    app.innerHTML = '<h2>Users &amp; staff</h2><div id="u"><p class="muted">Loading…</p></div>';
+    const root = document.getElementById('u');
+    const load = async () => {
+      try {
+        const data = await api('/api/admin/users?limit=100');
+        const rows = data.items || data;
+        root.innerHTML =
+          '<div class="card"><table><thead><tr><th>Name</th><th>Contact</th><th>Role</th><th>Status</th><th>Wallet</th><th></th></tr></thead><tbody>' +
+          rows.map((u) =>
+            '<tr><td>' + esc(u.full_name || u.username) + '</td><td class="muted">' + esc(u.email || '') + (u.phone ? ' · ' + esc(u.phone) : '') + '</td>' +
+            '<td>' + badge(u.role || 'customer') + '</td><td>' + badge(u.status || 'ACTIVE') + '</td>' +
+            '<td>' + (u.wallet ? money(u.wallet.available_balance) : '—') + '</td>' +
+            '<td>' + (u.status === 'BLOCKED'
+              ? '<button class="small success" data-unblock="' + u.id + '">Unblock</button>'
+              : '<button class="small danger" data-block="' + u.id + '">Block</button>') + '</td></tr>'
+          ).join('') + '</tbody></table><p class="muted">Blocked accounts cannot sign in; their wallets and history are preserved.</p></div>';
+        root.querySelectorAll('[data-block]').forEach((b) => {
+          b.onclick = async () => {
+            try { await api('/api/admin/users/' + b.getAttribute('data-block') + '/status', { method: 'PATCH', body: JSON.stringify({ status: 'BLOCKED' }) }); load(); }
+            catch (e) { alert(e.message); }
+          };
+        });
+        root.querySelectorAll('[data-unblock]').forEach((b) => {
+          b.onclick = async () => {
+            try { await api('/api/admin/users/' + b.getAttribute('data-unblock') + '/status', { method: 'PATCH', body: JSON.stringify({ status: 'ACTIVE' }) }); load(); }
+            catch (e) { alert(e.message); }
+          };
+        });
+      } catch (e) { root.innerHTML = '<div class="error-box">' + esc(e.message) + '</div>'; }
+    };
+    load();
+  }
+
+  let auditFilter = { action: '', entity: '' };
+  async function auditLogView() {
+    if (!requireRole(['admin'])) return;
+    closeSse();
+    app.innerHTML = '<h2>Audit log</h2><div id="al"><p class="muted">Loading…</p></div>';
+    const root = document.getElementById('al');
+    const load = async (page) => {
+      page = page || 1;
+      try {
+        const qs = new URLSearchParams({ page: String(page), limit: '20' });
+        if (auditFilter.action) qs.set('action', auditFilter.action);
+        if (auditFilter.entity) qs.set('entity_type', auditFilter.entity);
+        const data = await api('/api/admin/audit-logs?' + qs.toString());
+        root.innerHTML =
+          '<div class="card"><div class="row"><div><label>Action</label><input id="al-action" value="' + esc(auditFilter.action) + '" placeholder="DEPOSIT, AUTHITIZE…" /></div>' +
+          '<div><label>Entity</label><input id="al-entity" value="' + esc(auditFilter.entity) + '" placeholder="Wallet, FuelRequest…" /></div>' +
+          '<button class="primary" id="al-go">Filter</button></div></div>' +
+          '<div class="card"><table><thead><tr><th>When</th><th>Actor</th><th>Action</th><th>Entity</th><th>Entity ID</th><th>Detail</th></tr></thead><tbody>' +
+          (data.items || []).map((l) =>
+            '<tr><td>' + new Date(l.created_at).toLocaleString() + '</td><td>' + esc(l.actor_name || l.actor_type || 'system') + '</td>' +
+            '<td>' + badge(l.action) + '</td><td>' + esc(l.entity_type) + '</td><td class="mono muted">' + esc((l.entity_id || '').slice(0, 8)) + '</td>' +
+            '<td class="muted">' + esc(l.description || '') + '</td></tr>'
+          ).join('') + '</tbody></table>' +
+          '<div class="pager"><button id="al-prev" ' + (data.page <= 1 ? 'disabled' : '') + '>‹ Prev</button>' +
+          '<span class="muted">Page ' + data.page + ' / ' + data.total_pages + '</span>' +
+          '<button id="al-next" ' + (data.page >= data.total_pages ? 'disabled' : '') + '>Next ›</button></div></div>';
+        document.getElementById('al-go').onclick = () => {
+          auditFilter = {
+            action: document.getElementById('al-action').value.trim(),
+            entity: document.getElementById('al-entity').value.trim(),
+          };
+          load(1);
+        };
+        document.getElementById('al-prev').onclick = () => load(data.page - 1);
+        document.getElementById('al-next').onclick = () => load(data.page + 1);
+      } catch (e) { root.innerHTML = '<div class="error-box">' + esc(e.message) + '</div>'; }
+    };
+    load(1);
+  }
+
+  // ---------------- receipt view (stage 11) ----------------
+
+  async function receiptView(txnId) {
+    if (!state.user) { location.hash = '#/login'; return; }
+    closeSse();
+    app.innerHTML = '<h2>Receipt</h2><div id="rc"><p class="muted">Loading…</p></div>';
+    const root = document.getElementById('rc');
+    let t;
+    try { t = await api('/api/transactions/' + txnId); }
+    catch (e) { root.innerHTML = '<div class="error-box">' + esc(e.message) + '</div>'; return; }
+
+    root.innerHTML =
+      '<div class="card receipt"><div class="receipt-head">' +
+      '<div class="tick">✓</div><h3>Fuel purchase complete</h3></div>' +
+      '<table class="receipt-lines"><tbody>' +
+      '<tr><td>Reference</td><td>' + ref(t.transaction_reference) + '</td></tr>' +
+      '<tr><td>Station</td><td>' + esc(t.station.name) + (t.pump ? ' · Pump ' + t.pump.pump_number : '') + '</td></tr>' +
+      '<tr><td>Fuel</td><td>' + esc(t.fuel_type.name) + ' @ ' + money(t.price_per_litre) + '/L</td></tr>' +
+      '<tr><td>Authorized</td><td>' + Number(t.authorized_litres).toFixed(3) + ' L · ' + money(t.authorized_amount) + '</td></tr>' +
+      '<tr><td>Dispensed</td><td><b>' + (t.actual_litres != null ? Number(t.actual_litres).toFixed(3) + ' L' : '—') + '</b></td></tr>' +
+      '<tr class="total"><td>Final amount</td><td><b>' + (t.final_amount != null ? money(t.final_amount) + ' ' + esc(t.fuel_type.currency) : '—') + '</b></td></tr>' +
+      (t.request ? '<tr><td>Request</td><td>' + ref(t.request.request_reference) + '</td></tr>' : '') +
+      '<tr><td>Status</td><td>' + badge(t.status) + '</td></tr>' +
+      '</tbody></table>' +
+      '<div class="row" style="margin-top:14px">' +
+      (t.receipt_url ? '<a href="' + esc(t.receipt_url) + '" target="_blank"><button class="primary">⬇ Download PDF</button></a>' : '<span class="muted">PDF is generated shortly after settlement…</span>') +
+      '<a href="#/transactions"><button>Back to history</button></a></div></div>';
+  }
+
   // ---------------- router ----------------
 
   const routes = {
@@ -569,6 +781,9 @@
     '#/transactions': () => transactionsView(1),
     '#/staff': staffView,
     '#/staff-deposits': depositsView,
+    '#/admin': adminDashboardView,
+    '#/admin/users': adminUsersView,
+    '#/admin/audit-logs': auditLogView,
     '#/admin/fuel-types': fuelTypesView,
   };
 
@@ -580,6 +795,8 @@
       return;
     }
     renderChrome();
+    const receiptMatch = location.hash.match(/^#\/receipt\/(.+)$/);
+    if (receiptMatch) { receiptView(receiptMatch[1]); return; }
     const view = routes[location.hash] || loginView;
     view();
   }

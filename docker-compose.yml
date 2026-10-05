@@ -12,6 +12,11 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d smart_fuel_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   backend:
     build: .
@@ -22,8 +27,29 @@ services:
       - DATABASE_URL=postgresql://postgres:password@db:5432/smart_fuel_db
       - JWT_SECRET=supersecret
       - PORT=4000
+      - CORS_ORIGIN=*
+      - ESP32_API_KEY=${ESP32_API_KEY:-}
+      - DEVICE_SIGNING_SECRET=${DEVICE_SIGNING_SECRET:-}
+      - DEVICE_STATION_ID=${DEVICE_STATION_ID:-}
     depends_on:
-      - db
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Optional: Python pump-controller mock for testing without hardware.
+  # Start with: docker compose --profile mock up
+  esp32-mock:
+    image: python:3.11-alpine
+    container_name: smart-fuel-esp32-mock
+    profiles: ["mock"]
+    working_dir: /app
+    volumes:
+      - ./esp32-mock:/app
+    command: sh -c "pip install --no-cache-dir -r requirements.txt && python pump_mock.py --base-url http://backend:4000 --pump-id ${MOCK_PUMP_ID:?set MOCK_PUMP_ID to a pump uuid} --api-key ${ESP32_API_KEY:?set ESP32_API_KEY} --signing-secret ${DEVICE_SIGNING_SECRET:-${ESP32_API_KEY:-dev}}"
+    environment:
+      - ESP32_API_KEY=${ESP32_API_KEY:-}
+    depends_on:
+      - backend
 
 volumes:
   pgdata:

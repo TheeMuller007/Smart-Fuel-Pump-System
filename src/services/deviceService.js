@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const prisma = require('../models');
+const bus = require('../events/eventBus');
 
 class DeviceError extends Error {
   constructor(status, message) {
@@ -52,6 +53,54 @@ function payloadString(txn) {
 
 function signTransaction(txn) {
   return crypto.createHmac('sha256', signingSecret()).update(payloadString(txn)).digest('hex');
+}
+
+/**
+ * Latest reported device status per pump (in-memory; transient telemetry,
+ * not persisted). Shape: { current_litres, pump_state, error, updated_at }.
+ */
+const lastStatus = new Map();
+
+function getLastStatus(pumpId) {
+  return lastStatus.get(pumpId) || null;
+}
+
+/**
+ * ESP32 periodic status report: { current_litres, pump_state, error? }.
+ * Broadcast to station dashboards over SSE (stage 10).
+ */
+async function updateStatus(pumpId, { current_litres, pump_state, error } = {}) {
+  const pump = await prisma.pump.findUnique({ where: { id: pumpId } });
+  if (!pump) throw new DeviceError(404, 'Pump not found');
+
+  const current = current_litres === undefined || current_litres === null ? null : Number(current_litres);
+  if (current !== null && !Number.isFinite(current)) {
+    throw new DeviceError(400, 'current_litres must be a number');
+  }
+  const state = pump_state ? String(pump_state).toUpperCase().slice(0, 20) : null;
+
+  const status = {
+    pump_id: pumpId,
+    pump_number: pump.pump_number,
+    station_id: pump.station_id,
+    current_litres: current,
+    pump_state: state,
+    error: error ? String(error).slice(0, 300) : null,
+    updated_at: new Date().toISOString(),
+  };
+  lastStatus.set(pumpId, status);
+
+  // Customers watching their own dispense via /api/stream/me also get the
+  // telemetry when their transaction is the active one on this pump.
+  const targets = [{ type: 'pump', id: pumpId }, { type: 'station', id: pump.station_id }];
+  const active = await prisma.fuelTransaction.findFirst({
+    where: { pump_id: pumpId, status: 'AUTHORIZED' },
+    select: { user_id: true },
+  });
+  if (active) targets.push({ type: 'user', id: active.user_id });
+
+  bus.publish('pump_status', status, targets);
+  return { status: 'ok' };
 }
 
 /**
@@ -132,13 +181,26 @@ async function ackDispense(pumpId, { transaction_id, actual_litres, device_signa
     name: 'ESP32 pump controller',
   };
   const fuelService = require('./fuelService');
+  // completeDispense broadcasts dispense_completed/receipt_ready and triggers
+  // PDF generation for every completion path (device ack and staff alike).
   const completed = await fuelService.completeDispense(txn.id, { actual_litres: actual }, staffContext);
+
   return {
     status: 'completed',
     transaction_reference: completed.transaction_reference,
+    actual_litres: completed.actual_litres,
     final_amount: completed.final_amount,
     refund_amount: completed.refund_amount,
+    receipt_url: completed.receipt_url || null,
   };
 }
 
-module.exports = { assertDeviceAccess, getAuthorizationForPump, ackDispense, signTransaction, DeviceError };
+module.exports = {
+  assertDeviceAccess,
+  getAuthorizationForPump,
+  updateStatus,
+  getLastStatus,
+  ackDispense,
+  signTransaction,
+  DeviceError,
+};

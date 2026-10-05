@@ -27,6 +27,34 @@ router.get('/authorizations/:pump_id', async (req, res, next) => {
 });
 
 /**
+ * POST /api/esp32/status/:pump_id
+ * Periodic telemetry from the controller: current litres dispensed, relay
+ * state, optional error string. Broadcast to station dashboards (stage 10).
+ */
+router.post('/status/:pump_id', async (req, res, next) => {
+  try {
+    const result = await deviceService.updateStatus(req.params.pump_id, req.body || {});
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /api/esp32/completed/:pump_id
+ * Alternative completion path used by firmware that tracks its own flow
+ * totals: identical semantics to /ack but named for the dispense lifecycle.
+ */
+router.post('/completed/:pump_id', async (req, res, next) => {
+  try {
+    const result = await deviceService.ackDispense(req.params.pump_id, req.body || {});
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
  * POST /api/esp32/authorizations/:pump_id/ack
  * Controller reports the dispense result; the wallet is charged from the
  * reserve and the remainder released (same settlement as staff completion).

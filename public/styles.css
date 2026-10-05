@@ -146,5 +146,75 @@ tr:last-child td { border-bottom: none; }
 .search-result .who .sub { color: var(--muted); font-size: 13px; }
 .search-result .bal { text-align: right; color: var(--accent-2); font-weight: 600; }
 
-.pager { display: flex; gap: 10px; align-items: center; justify-content: end; margin-top: 12px; }
-.mono { font-family: 'Cascadia Code', Consolas, monospace; font-size: 12px; color: var(--muted); }
+/* ---------------- stage 12: admin dashboard ---------------- */
+
+.stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 14px; margin-bottom: 18px; }
+.stat { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; }
+.stat .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; }
+.stat .value { font-size: 24px; font-weight: 600; margin-top: 4px; }
+.stat.money .value { color: var(--accent-2); }
+.stat.warn .value { color: var(--warn); }
+
+.badge.BLOCKED { color: var(--danger); border-color: var(--danger); }
+.badge.OFFLINE { color: var(--danger); border-color: var(--danger); }
+.badge.RESERVED_PUMP { color: var(--warn); }
+.badge.BUSY { color: var(--warn); border-color: var(--warn); }
+
+/* ---------------- stage 10: live dispensing ---------------- */
+
+.pump-live { border-color: var(--accent); }
+.live-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 12px; }
+.pump-state { font-size: 13px; font-weight: 700; letter-spacing: 0.06em; }
+.pump-state.on { color: var(--accent-2); }
+.pump-state.off { color: var(--muted); }
+.progress {
+  height: 14px; background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: 999px; overflow: hidden;
+}
+.progress .fill {
+  height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  border-radius: 999px; transition: width 0.6s ease;
+}
+.live-nums { margin-top: 8px; font-size: 15px; }
+.live-nums b { font-size: 20px; }
+
+/* ---------------- stage 11: receipt ---------------- */
+
+.receipt { max-width: 560px; }
+.receipt-head { display: flex; align-items: center; gap: 14px; margin-bottom: 12px; }
+.receipt-head .tick { font-size: 38px; color: var(--accent-2); }
+.receipt-head h3 { color: var(--text); text-transform: none; letter-spacing: 0; font-size: 18px; margin: 0; }
+.receipt-lines td { padding: 7px 0; border-bottom: 1px dashed var(--border); }
+.receipt-lines td:first-child { color: var(--muted); width: 40%; }
+.receipt-lines td:last-child { text-align: right; }
+.receipt-lines tr.total td { font-size: 16px; border-bottom: none; }
+
+/* ---------------- stage 13: responsive polish ---------------- */
+
+@media (max-width: 720px) {
+  header { flex-wrap: wrap; padding: 10px 14px; gap: 10px; }
+  nav { margin-left: 0; width: 100%; order: 3; }
+  main { margin: 14px auto; }
+  .balances { flex-direction: column; }
+  .row { flex-direction: column; align-items: stretch; }
+  .row > button { flex: 1 1 auto; }
+  table { font-size: 13px; }
+  th, td { padding: 7px 6px; }
+  .stats-row { grid-template-columns: repeat(2, 1fr); }
+  .modal { width: 94vw; }
+}
+
+.badge.CUSTOMER { color: var(--muted); }
+.badge.STAFF, .badge.ADMIN { color: var(--accent); border-color: var(--accent); }
+.badge.SUPERVISOR { color: var(--accent-2); border-color: var(--accent-2); }
+
+/* ---------------- stage 13: micro-animations ---------------- */
+
+.card, .stat { animation: rise 0.25s ease both; }
+@keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .card, .stat { animation: none; }
+  .progress .fill { transition: none; }
+}
+

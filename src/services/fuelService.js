@@ -402,6 +402,32 @@ async function authorizeRequest(requestId, staff, pump_id) {
     await tx.pump.update({ where: { id: pumpId }, data: { status: 'BUSY' } });
 
     return { request: updatedRequest, transaction };
+  }).then(async (result) => {
+    // Tell live dashboards (stage 10) that dispensing may begin.
+    const bus = require('../events/eventBus');
+    const reqInfo = await prisma.fuelRequest.findUnique({
+      where: { id: result.request.id },
+      select: { user: { select: { full_name: true } }, fuel_type: { select: { name: true } } },
+    });
+    bus.publish(
+      'dispense_started',
+      {
+        pump_id: result.transaction.pump_id,
+        transaction_id: result.transaction.id,
+        transaction_reference: result.transaction.transaction_reference,
+        authorized_litres: result.transaction.authorized_litres,
+        authorized_amount: result.transaction.authorized_amount,
+        price_per_litre: result.transaction.price_per_litre,
+        customer: reqInfo ? reqInfo.user.full_name : undefined,
+        fuel_type: reqInfo ? reqInfo.fuel_type.name : undefined,
+      },
+      [
+        { type: 'pump', id: result.transaction.pump_id },
+        { type: 'user', id: result.transaction.user_id },
+        { type: 'station', id: result.transaction.station_id },
+      ]
+    );
+    return result;
   });
 }
 
@@ -474,6 +500,38 @@ async function completeDispense(transactionId, { actual_litres }, staff) {
 
     await tx.fuelRequest.update({ where: { id: txn.request_id }, data: { status: 'COMPLETED' } });
     await tx.pump.update({ where: { id: txn.pump_id }, data: { status: 'AVAILABLE' } });
+
+    return completed;
+  }).then(async (completed) => {
+    // Post-commit: broadcast the completion (stage 10) and kick off receipt
+    // generation (stage 11). The receipt link reaches clients via the
+    // receipt_ready event or GET /api/transactions/:id when ready.
+    const bus = require('../events/eventBus');
+    const targets = [
+      { type: 'pump', id: completed.pump_id },
+      { type: 'user', id: completed.user_id },
+      { type: 'station', id: completed.station_id },
+    ];
+    bus.publish('dispense_completed', {
+      pump_id: completed.pump_id,
+      transaction_id: completed.id,
+      transaction_reference: completed.transaction_reference,
+      actual_litres: completed.actual_litres,
+      final_amount: completed.final_amount,
+      refund_amount: completed.refund_amount,
+    }, targets);
+
+    const receiptService = require('./receiptService');
+    receiptService
+      .generateReceipt(completed.id)
+      .then((receipt) => {
+        bus.publish('receipt_ready', {
+          transaction_id: completed.id,
+          transaction_reference: completed.transaction_reference,
+          receipt_url: receipt.receipt_url,
+        }, targets);
+      })
+      .catch((err) => console.error('Receipt generation failed:', err.message));
 
     return completed;
   });

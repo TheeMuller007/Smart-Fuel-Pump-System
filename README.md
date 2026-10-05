@@ -15,20 +15,29 @@ settles the final payment and releases any unused reserve.
 ## Project Structure
 
 ```
-├── api/openapi.yaml          # OpenAPI 3 contract
+├── api/openapi.yaml          # OpenAPI 3 contract (served at /docs)
+├── esp32-mock/
+│   ├── firmware/             # Compilable ESP32 Arduino sketch + config template
+│   ├── pump_mock.py          # Python pump-controller mock (no hardware needed)
+│   └── requirements.txt
 ├── migrations/               # Raw SQL migrations (auto-loaded by docker-compose init)
 │   ├── 001_initial.sql
 │   └── 002_refresh_tokens.sql
 ├── prisma/
 │   ├── schema.prisma         # Prisma data model (mirrors SQL migrations)
 │   └── seed.js               # Demo data: fuel types, station, pumps, users
-├── public/                   # Web portal (customer + staff)
-└── src/
-    ├── index.js              # Express app wiring
-    ├── middleware/auth.js    # authenticateToken / authorizeRole
-    ├── models/index.js       # Prisma client singleton
-    ├── routes/               # auth, customers, wallet, fuel-requests, staff, catalog
-    └── services/             # authService, walletService (ledger), fuelService
+├── public/                   # Web portal (customer, staff, admin)
+├── scripts/                  # Self-tests (ledger math, HMAC signature)
+├── src/
+│   ├── events/eventBus.js    # In-process pub/sub powering the SSE streams
+│   ├── jobs/                 # Background expiry job
+│   ├── middleware/auth.js    # authenticateToken / authorizeRole
+│   ├── models/index.js       # Prisma client singleton
+│   ├── routes/               # auth, customers, wallet, fuel-requests, staff,
+│   │                         # admin, catalog, device (ESP32), stream (SSE), receipts
+│   └── services/             # auth, wallet (ledger), fuel, staff, admin,
+│                             # device, receipt, audit
+└── test/                     # mocha unit tests (services)
 ```
 
 ## Getting Started
@@ -43,6 +52,8 @@ npm run dev                   # API + portal on http://localhost:4000
 ```
 
 Or run everything in Docker: `docker compose up --build`.
+
+To also start the Python pump mock (simulates the ESP32 controller; pumps ID 1 and 2):
 
 ### Demo Credentials
 
@@ -80,10 +91,24 @@ Or run everything in Docker: `docker compose up --build`.
 | POST   | `/api/staff/fuel-requests/:id/cancel`    | staff | Cancel + release                        |
 | GET    | `/api/staff/fuel-transactions`      | staff     | Station transaction log                  |
 | POST   | `/api/staff/fuel-transactions/:id/complete` | staff | Complete dispense, settle ledger     |
+| GET    | `/api/transactions/:id`             | owner     | Transaction detail + receipt URL         |
+| GET    | `/api/stream/pumps/:pump_id`        | owner²    | SSE — live dispensing progress           |
+| GET    | `/api/stream/station`               | staff     | SSE — all pumps at caller's station      |
+| GET    | `/api/stream/me`                    | customer  | SSE — wallet, requests, dispensing       |
+| POST   | `/api/esp32/authorizations/:pump_id/status` | device¹ | Telemetry `{current_litres, pump_state}` |
+| POST   | `/api/esp32/authorizations/:pump_id/completed` | device¹ | Final report → settle + receipt    |
+| GET    | `/api/admin/dashboard`              | admin     | Cards: counts, litres/revenue today, audit |
+| GET/PATCH | `/api/admin/users(/:id/status)`  | admin     | User list, block/unblock                 |
+| GET/POST/PATCH | `/api/admin/stations(/:id)`  | admin     | Station CRUD                             |
+| GET/POST/PATCH/DELETE | `/api/admin/pumps(/:id)` | admin  | Pump CRUD                                |
+| GET/POST/PATCH | `/api/admin/staff(/:id)`      | admin     | Staff account CRUD                       |
+| GET    | `/api/admin/audit-logs`             | admin     | Filterable audit trail                   |
+| GET    | `/docs`                             | –         | Swagger UI (OpenAPI inspector)           |
 | GET    | `/api/esp32/authorizations/:pump_id` | device¹   | Signed AUTHORIZED transaction for a pump |
 | POST   | `/api/esp32/authorizations/:pump_id/ack` | device¹ | Controller reports dispense result      |
 
 <sup>¹</sup> Device endpoints authenticate with the `x-api-key` header (`ESP32_API_KEY`) and are disabled when it is unset.
+<sup>²</sup> SSE streams use `?token=<jwt>` (EventSource cannot set headers); authorization rules are identical to the REST API.
 
 Full request/response schemas: [`api/openapi.yaml`](api/openapi.yaml).
 
@@ -176,6 +201,50 @@ double-release funds.
 - [x] UI: Assign Pump dropdown + **Assign** button, **Authorize** enabled once assigned
 - **Deliverable:** Signed transaction that the ESP32 can fetch
 
+### Stage 9 – ESP32 Firmware (IoT Controller) ✅
+- [x] HTTPS client authenticates with a static API key (`x-api-key`)
+- [x] Poll `/esp32/authorizations/:pump_id` for an `AUTHORIZED` transaction (signature verified on-device)
+- [x] Open relay to power pump; read flow-sensor pulses → litres
+- [x] Periodically `POST /esp32/authorizations/:pump_id/status` with `{currentLitres, pumpState}`
+- [x] When `currentLitres ≥ authorizedLitres` → close relay, `POST …/completed` with final quantity
+- [x] Error status on sensor failure / dispense timeout
+- [x] **Python mock** (`esp32-mock/pump_mock.py`) for early integration testing without hardware
+- **Deliverable:** Compilable sketch (`esp32-mock/firmware/`) + mock that talks to the server
+
+### Stage 10 – Real-Time Dispensing UI (SSE) ✅
+- [x] Server-sent events endpoints `/api/stream/pumps/:pump_id`, `/api/stream/station`, `/api/stream/me`
+- [x] `pumpProgress` component (vanilla JS) subscribes and renders a progress bar, current litres, pump ON/OFF indicator
+- [x] Used in both customer dashboard and staff fuel desk
+- **Deliverable:** Live, animated view of dispensing progress
+
+### Stage 11 – Transaction Finalisation & Receipt Generation ✅
+- [x] On completion, backend calculates `final_amount = actual_litres × price_per_litre`
+- [x] `FUEL_PAYMENT` wallet transaction; unused reserve released back to `available_balance`
+- [x] `fuel_transactions.status = COMPLETED` with timestamps
+- [x] PDF receipt (pdfkit) generated on demand, stored link (`receipt_url`), protected download
+- [x] UI: Receipt page with **Download PDF** button
+- **Deliverable:** Funds settled, receipt downloadable
+
+### Stage 12 – Admin Dashboard & Auditing ✅
+- [x] Admin CRUD for stations, pumps, staff (fuel types since Stage 5)
+- [x] `GET /audit-logs` with filters (action, entity, date range, user, station)
+- [x] UI: Admin Dashboard cards (customers, stations, active pumps, litres/revenue today, recent audits)
+- [x] Block/unblock accounts (`status` field, enforced at login)
+- **Deliverable:** Full system oversight and immutable audit trail
+
+### Stage 13 – Polish, Security & Testing ✅
+- [x] Unit tests for services (wallet ledger, auth) — `npm test` (mocha + self-tests)
+- [x] Security hardening: helmet, rate limiting, configurable CORS, `.env` secret management
+- [x] UI polish: dark theme, micro-animations, responsive mobile-first layout
+- [x] Swagger UI at `/docs` for API inspection
+- **Deliverable:** Test-covered, secure, visually polished prototype
+
+### Stage 14 – Deployment & Documentation ✅
+- [x] `docker-compose.yml` with `db`, `backend` and optional `esp32-mock` services
+- [x] README: prerequisites, one-command start, demo credentials, portal walkthroughs
+- [x] OpenAPI spec published via Swagger UI (`/docs`), linked from README
+- **Deliverable:** One-click start for reviewers; full documentation
+
 ## ESP32 Pump Controller Integration
 
 Configure in `.env`:
@@ -199,6 +268,31 @@ Poll loop on the controller:
      unused reserve) and frees the pump
    - `device_signature` is optional but recommended: it proves the ack came from the
      device that received the signed authorization
+
+### Python mock (no hardware needed)
+
+```bash
+pip install -r esp32-mock/requirements.txt
+python esp32-mock/pump_mock.py --base-url http://localhost:4000 --pump-id <PUMP_UUID> \
+  --api-key "$ESP32_API_KEY" --signing-secret "$DEVICE_SIGNING_SECRET"
+```
+
+Or run it via Docker alongside the stack: `docker compose --profile mock up`. The mock polls
+for authorizations on its pump, verifies the HMAC signature, "dispenses" at a configurable
+litres-per-second rate, streams status telemetry, and completes the transaction — driving the
+full request → authorize → dispense → settle → receipt loop end to end.
+
+## Testing & Security
+
+```bash
+npm test        # mocha unit tests (wallet ledger, auth) + ledger/signature self-tests
+npm run lint    # eslint
+```
+
+Security posture: bcrypt-only password hashing, JWT access (15 m) + rotating refresh tokens
+(7 d, hashed at rest, revoked on logout), role-scoped endpoints, helmet headers, rate-limited
+API, constant-time device API-key comparison, HMAC-signed device payloads, receipt URLs with
+expiring signed tokens, configurable CORS, and secrets via `.env` (never committed).
 
 ## ER Diagram
 
