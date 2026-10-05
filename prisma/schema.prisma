@@ -173,6 +173,7 @@ model FuelTransaction {
   status              String   @default("AUTHORIZED")
   started_at          DateTime?
   completed_at        DateTime?
+  receipt_url         String?
   created_at          DateTime @default(now())
   updated_at          DateTime @updatedAt
 }

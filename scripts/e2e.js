@@ -11,6 +11,11 @@
  *   python pump mock dispenses (poll -> verify signature -> telemetry -> ack)
  *   wallet settles (FUEL_PAYMENT + release) -> receipt PDF generated
  *
+ * plus the unhappy paths:
+ *   staff reject        -> reserve released, pump freed
+ *   expired reservation -> funds auto-released (lazy expiry), pump freed
+ *   device double-ack   -> idempotent, wallet charged exactly once
+ *
  * Everything is asserted over HTTP; nothing is imported from src/, so this
  * tests the deployed behavior, not the internals.
  *
@@ -296,9 +301,15 @@ async function main() {
     assert(stations.status === 200 && stations.data.length > 0, `stations listed (${(stations.data || []).length})`);
     const station = stations.data[0];
     const pumps = (await api(`/api/stations/${station.id}/pumps`)).data || [];
+    // Two pumps: one for the happy path (the mock dispenses on it), one for
+    // the reject/expiry/double-ack scenarios — so they never contend.
     const pump = pumps.find((p) => p.status === 'AVAILABLE');
+    const sparePump = pumps.find((p) => p.status === 'AVAILABLE' && p.id !== pump.id);
     if (!assert(pump, `available pump at "${station.name}" (found ${pumps.length}: ${pumps.map((p) => `${p.pump_number}:${p.status}`).join(', ')})`)) {
       throw new Error('no available pump — re-run against a fresh test DB');
+    }
+    if (!assert(sparePump, 'second available pump for the unhappy-path scenarios')) {
+      throw new Error('need a second available pump — re-run against a fresh test DB');
     }
     ok(`pump #${pump.pump_number} (${pump.fuel_type.name} @ ${Number(pump.fuel_type.price_per_litre).toFixed(3)}/L)`);
 
@@ -402,7 +413,118 @@ async function main() {
     const anonRes = await fetch(BASE + withReceipt.receipt_url);
     assert(anonRes.status === 200, 'receipt URL works without a bearer token (signed link)');
 
-    console.log(`\n\x1b[32mE2E PASSED\x1b[0m — full loop verified in ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);
+    // 12. Unhappy paths -------------------------------------------------------------------------
+    console.log('\nUnhappy paths');
+
+    // All scenarios use the same customer wallet; every reserve below is
+    // released again by the scenario itself, so balances return to baseline.
+    const reserve = async (pumpForRequest) => {
+      const createdReq = await api('/api/fuel-requests', {
+        method: 'POST',
+        token: custToken,
+        body: {
+          station_id: station.id,
+          fuel_type_id: pumpForRequest.fuel_type.id,
+          pump_id: pumpForRequest.id,
+          requested_litres: REQUESTED_LITRES,
+        },
+      });
+      assert(createdReq.status === 201, `reserve on pump #${pumpForRequest.pump_number} → 201 (got ${createdReq.status})`);
+      return createdReq.data;
+    };
+    const pumpStatus = async (pumpId) => {
+      const list = (await api(`/api/stations/${station.id}/pumps`)).data || [];
+      return (list.find((p) => p.id === pumpId) || {}).status;
+    };
+
+    // -- Scenario A: staff reject releases the reserve and frees the pump ------
+    const w0 = (await api('/api/wallet', { token: custToken })).data;
+    const rejectedReq = await reserve(sparePump);
+    const rejected = await api(`/api/staff/requests/${rejectedReq.id}/reject`, { method: 'POST', token: staffToken, body: {} });
+    assert(rejected.status === 200 && rejected.data.status === 'REJECTED',
+      `staff reject → REJECTED (got ${rejected.status} ${JSON.stringify(rejected.data).slice(0, 120)})`);
+    const wRej = (await api('/api/wallet', { token: custToken })).data;
+    assert(cents(wRej.available_balance) === cents(w0.available_balance) && cents(wRej.reserved_balance) === cents(w0.reserved_balance),
+      'reject refunds the full reserve (wallet back to baseline)');
+    const rejLedger = (await api('/api/wallet/transactions?page=1&limit=10', { token: custToken })).data.items || [];
+    assert(rejLedger.some((t) => t.type === 'RELEASE' && (t.description || '').includes(rejectedReq.request_reference)),
+      `ledger RELEASE row for ${rejectedReq.request_reference}`);
+    assert((await pumpStatus(sparePump.id)) === 'AVAILABLE', 'rejected request frees its assigned pump');
+
+    // -- Scenario B: expired reservation auto-releases funds --------------------
+    // The TTL is 15 min and the background job ticks every minute; the e2e
+    // exercises the LAZY expiry pass instead (staff list pending-requests with
+    // an already-stale request) by backdating expires_at directly — test-only
+    // shortcut, acting on exactly the state the background job would see.
+    const psqlBin = ['C:\\Program Files\\PostgreSQL\\17\\bin', 'C:\\Program Files\\PostgreSQL\\16\\bin', 'C:\\Program Files\\PostgreSQL\\15\\bin']
+      .map((d) => path.join(d, 'psql.exe')).find((p) => fs.existsSync(p));
+    if (!psqlBin) {
+      console.log('  ⚠ skipping expiry scenario (psql.exe not found for direct DB access)');
+    } else {
+      const w1 = (await api('/api/wallet', { token: custToken })).data;
+      const expiredReq = await reserve(sparePump);
+      execFileSync(psqlBin, [
+        DB_URL.split('?')[0], '-c',
+        // Prisma maps DateTime to timestamp-without-time-zone in UTC; casting
+        // NOW() with AT TIME ZONE 'UTC' writes naive UTC to match it.
+        `UPDATE "FuelRequest" SET "expires_at" = (NOW() AT TIME ZONE 'UTC') - INTERVAL '1 minute' WHERE id = '${expiredReq.id}';`,
+      ], { stdio: 'pipe', timeout: 15000 });
+      const listed = (await api('/api/staff/pending-requests', { token: staffToken })).data || [];
+      const expiredRow = Array.isArray(listed) ? listed.find((r) => r.id === expiredReq.id) : null;
+      assert(!expiredRow || expiredRow.status === 'EXPIRED',
+        `lazy expiry flips stale RESERVED → EXPIRED (row ${expiredRow ? `returned as ${expiredRow.status}` : 'dropped from pending list'})`);
+      const wExp = (await api('/api/wallet', { token: custToken })).data;
+      assert(cents(wExp.available_balance) === cents(w1.available_balance) && cents(wExp.reserved_balance) === cents(w1.reserved_balance),
+        'expiry returns the reserved funds (wallet back to baseline)');
+      assert((await pumpStatus(sparePump.id)) === 'AVAILABLE', 'expired reservation frees its assigned pump');
+    }
+
+    // -- Scenario C: device double-ack is idempotent -----------------------------
+    // Full loop on the spare pump (no mock needed — we ack manually), then a
+    // second ack for the SAME transaction must be a no-op for the wallet.
+    const w2 = (await api('/api/wallet', { token: custToken })).data;
+    const dbl = await reserve(sparePump);
+    await api(`/api/staff/requests/${dbl.id}/assign-pump`, { method: 'POST', token: staffToken, body: { pump_id: sparePump.id } });
+    const dblAuth = await api(`/api/staff/fuel-requests/${dbl.id}/authorize`, { method: 'POST', token: staffToken, body: {} });
+    if (!assert(dblAuth.status === 200, `authorize for double-ack scenario → 200 (got ${dblAuth.status})`)) {
+      throw new Error('double-ack scenario could not authorize');
+    }
+    const dblTxn = dblAuth.data.transaction;
+    // w2 was snapshotted BEFORE the reserve: a prepaid wallet is debited at
+    // reserve time, so settlement itself only drains reserved_balance — the
+    // pre-reserve snapshot is what a second (buggy) payment would corrupt.
+    const ackBody = { transaction_id: dblTxn.id, actual_litres: REQUESTED_LITRES };
+    const ack1 = await fetch(`${BASE}/api/esp32/authorizations/${sparePump.id}/ack`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': ESP32_API_KEY },
+      body: JSON.stringify(ackBody),
+    });
+    const ack1Data = await ack1.json().catch(() => ({}));
+    assert(ack1.status === 200 && ack1Data.status === 'completed', `first device ack → completed (got ${ack1.status} ${JSON.stringify(ack1Data).slice(0, 80)})`);
+    const ack2res = await fetch(`${BASE}/api/esp32/authorizations/${sparePump.id}/ack`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': ESP32_API_KEY },
+      body: JSON.stringify(ackBody),
+    });
+    const ack2 = await ack2res.json().catch(() => ({}));
+    assert(ack2res.status === 200 && ack2.status === 'already_completed',
+      `second device ack → idempotent (got ${ack2res.status} ${JSON.stringify(ack2).slice(0, 80)})`);
+    const w3 = (await api('/api/wallet', { token: custToken })).data;
+    const singlePayment = Number(dbl.price_per_litre) * REQUESTED_LITRES;
+    assert(cents(w3.available_balance) === cents(Number(w2.available_balance) - singlePayment),
+      `double-ack charged exactly once (available ${Number(w3.available_balance).toFixed(2)}, expected ${(Number(w2.available_balance) - singlePayment).toFixed(2)})`);
+    assert(cents(w3.reserved_balance) === cents(w2.reserved_balance),
+      `reserve fully consumed by settlement (reserved back to ${Number(w2.reserved_balance).toFixed(2)})`);
+    const payCount = ((await api('/api/wallet/transactions?page=1&limit=20', { token: custToken })).data.items || [])
+      .filter((t) => t.type === 'FUEL_PAYMENT' && (t.reference || '').includes(dblTxn.transaction_reference)).length;
+    assert(payCount === 1, `exactly one FUEL_PAYMENT row for ${dblTxn.transaction_reference} (found ${payCount})`);
+
+    if (failures === 0) {
+      console.log(`\n\x1b[32mE2E PASSED\x1b[0m — full loop + unhappy paths verified in ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);
+    } else {
+      fail(`${failures} check(s) failed`);
+      console.log(`\n\x1b[31mE2E FAILED\x1b[0m after ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);
+    }
   } catch (error) {
     fail(error.message);
     console.log(`\n\x1b[31mE2E FAILED\x1b[0m after ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);

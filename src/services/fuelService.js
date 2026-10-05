@@ -148,6 +148,19 @@ async function createFuelRequest(user, { station_id, fuel_type_id, pump_id, requ
 }
 
 /**
+ * Free a pump that is still held (RESERVED/BUSY) for a request that is being
+ * cancelled, rejected or expired. Without this the pump would leak: no other
+ * customer could ever reserve it again.
+ */
+async function releaseHeldPump(tx, request) {
+  if (!request.pump_id) return;
+  const pump = await tx.pump.findUnique({ where: { id: request.pump_id } });
+  if (pump && ['RESERVED', 'BUSY'].includes(pump.status)) {
+    await tx.pump.update({ where: { id: pump.id }, data: { status: 'AVAILABLE' } });
+  }
+}
+
+/**
  * Release funds for RESERVED requests whose TTL has lapsed.
  * Each request is claimed atomically (status flip under a status guard) so the
  * background job and lazy expiry paths can never double-release funds.
@@ -168,6 +181,8 @@ async function expireStaleRequests(tx, stationId) {
       data: { status: 'EXPIRED' },
     });
     if (claimed.count !== 1) continue; // another path already handled it
+
+    await releaseHeldPump(tx, request);
 
     const wallet = await tx.wallet.findUnique({ where: { user_id: request.user_id } });
     if (wallet) {
@@ -233,6 +248,8 @@ async function cancelRequest(requestId, actor) {
     const wallet = await tx.wallet.findUnique({ where: { user_id: request.user_id } });
     if (!wallet) throw new FuelError(404, 'Wallet not found');
 
+    await releaseHeldPump(tx, request);
+
     await walletService.ledgerEntryInTx(tx, {
       walletId: wallet.id,
       type: 'RELEASE',
@@ -293,6 +310,8 @@ async function rejectRequest(requestId, staff) {
 
     const wallet = await tx.wallet.findUnique({ where: { user_id: request.user_id } });
     if (!wallet) throw new FuelError(404, 'Wallet not found');
+
+    await releaseHeldPump(tx, request);
 
     await walletService.ledgerEntryInTx(tx, {
       walletId: wallet.id,

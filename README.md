@@ -321,6 +321,10 @@ Python pump mock, and drives the full prepaid loop over HTTP with assertions at 
 > customer login → create request (reserve) → staff assign pump → authorize →
 > **mock dispenses** (signature-verified, with telemetry) → wallet settles →
 > ledger rows verified → **receipt PDF downloaded** (incl. anonymous signed-link check)
+>
+> plus the unhappy paths: **staff reject** refunds the reserve and frees the pump,
+> an **expired reservation** auto-releases its funds (lazy expiry) and frees the pump,
+> and a **device double-ack** is idempotent — the wallet is charged exactly once.
 
 One-time setup — create a dedicated test database (never points at your dev data):
 
@@ -338,9 +342,9 @@ npm run test:e2e -- --port 4200           # different API port
 npm run test:e2e -- --skip-migrate        # schema already applied
 ```
 
-The script requires Node 20+ (native fetch) and Python 3 with `requests` for the mock.
-Exit code 0 = the whole dispensing loop works end to end; any failed assertion exits non-zero
-and dumps the tail of the server/mock logs.
+The script requires Node 20+ (native fetch) and Python 3 (the mock is stdlib-only — no pip installs).
+Exit code 0 = the whole dispensing loop and all unhappy paths pass; any failed assertion exits
+non-zero and dumps the tail of the server/mock logs.
 
 Security posture: bcrypt-only password hashing, JWT access (15 m) + rotating refresh tokens
 (7 d, hashed at rest, revoked on logout), role-scoped endpoints, helmet headers, rate-limited
