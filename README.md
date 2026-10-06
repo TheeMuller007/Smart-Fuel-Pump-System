@@ -136,6 +136,20 @@ To also start the Python pump mock (simulates the ESP32 controller; pumps ID 1 a
 
 Full request/response schemas: [`api/openapi.yaml`](api/openapi.yaml).
 
+## Hardware Bring-Up
+
+Ready to connect a real pump controller? **[docs/hardware-bringup.md](docs/hardware-bringup.md)**
+covers it end to end: bill of materials, relay + flow-sensor wiring,
+`config.h` field-by-field, bench calibration of `PULSES_PER_LITRE` with a
+graduated container, Windows-firewall/LAN setup so the ESP32 can reach the
+backend, a water smoke test, and failure-mode drills (power-loss recovery,
+stuck-dispense reaping, no-flow fault).
+
+No hardware yet? The Python mock (`esp32-mock/pump_mock.py`, stdlib only)
+drives the identical server flow — `npm run test:e2e` proves the full
+request → authorize → dispense → settle → receipt loop, plus the chaos
+scenario where a dead controller is recovered without charging the customer.
+
 ## Wallet Ledger
 
 Every balance change writes a `wallet_transactions` row with `balance_before`/`balance_after`
