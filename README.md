@@ -150,6 +150,44 @@ drives the identical server flow — `npm run test:e2e` proves the full
 request → authorize → dispense → settle → receipt loop, plus the chaos
 scenario where a dead controller is recovered without charging the customer.
 
+## Backup & Restore
+
+The database **and** the generated receipt PDFs are backed up together into a
+single timestamped archive under `backups/`:
+
+```
+npm run db:backup               # pg_dump (-Fc) + receipts/ → backups/smart-fuel-backup-<stamp>.tar.gz
+npm run db:backup -- --keep 30  # retention: keep the newest 30 archives (default 14)
+npm run db:restore -- --file backups/smart-fuel-backup-<stamp>.tar.gz --force
+npm run db:drill                # prove the backup is restorable (see below)
+```
+
+Restore **drops and recreates** the database (hence `--force`), replays the
+pg_dump with `pg_restore`, and restores the receipts folder with *snapshot*
+semantics — receipts created after the archive was taken are removed, so the
+restored state genuinely matches the backup. Restart the backend afterwards.
+
+### The restore drill
+
+A backup you've never restored is a hope, not a backup. `npm run db:drill`
+performs the full round-trip and verifies it:
+
+1. takes a fresh backup;
+2. damages the system *after* the backup (a canary user+wallet row with a
+   known balance, plus a canary receipt PDF);
+3. restores the pre-canary archive;
+4. verifies: the canary row is **gone** (the restore really replaced the
+   data), seeded data is intact, every pre-backup receipt is present, and the
+   canary receipt is **gone** (snapshot, not a merge);
+5. cleans up (pass `--keep-hole` to keep the drill archive for inspection).
+
+Run it after any change to the schema, the receipts layout, or before you
+actually need the backup. It exits non-zero on the first failed check.
+
+> The drill performs a real `DROP DATABASE` + restore of the live database.
+> Run it on a machine where that's acceptable (the local demo cluster — or a
+> staging copy). Never point it at production without a maintenance window.
+
 ## Wallet Ledger
 
 Every balance change writes a `wallet_transactions` row with `balance_before`/`balance_after`

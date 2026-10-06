@@ -29,5 +29,6 @@ Thumbs.db
 
 # Project-local PostgreSQL cluster (scripts/localdb.js)
 .pgdata/
+backups/
 .pglog
 .pgpwfile
