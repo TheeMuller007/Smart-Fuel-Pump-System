@@ -208,6 +208,103 @@ releases their funds; expiry is also applied lazily when staff list requests or 
 All status flips use a status guard so concurrent expiry/accept/reject paths can never
 double-release funds.
 
+The prose above is complete, but the two state machines are easier to read
+as diagrams:
+
+### Fuel-request lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> RESERVED : customer POSTs /fuel-requests
+    note right of RESERVED
+      funds moved from available_balance
+      to reserved_balance at reserve time
+    end note
+
+    RESERVED --> ACCEPTED : staff POSTs /requests/:id/accept
+    note right of ACCEPTED
+      reservation retained; pump still free
+    end note
+
+    ACCEPTED --> AUTHORIZED : staff POSTs /requests/:id/authorize
+    note right of AUTHORIZED
+      FuelTransaction created with
+      transaction_reference = FUEL-YYYYMMDD-NNNNNN
+      pump held; ESP32 may now dispense
+    end note
+
+    AUTHORIZED --> COMPLETED : ESP32 POSTs /authorizations/:id/ack (settled)
+    note right of COMPLETED
+      FUEL_PAYMENT posted for actual_litres x
+      price_per_litre; unused reserve RELEASEd
+    end note
+
+    RESERVED --> CANCELLED : customer POSTs /fuel-requests/:id/cancel
+    RESERVED --> REJECTED : staff POSTs /requests/:id/reject
+    RESERVED --> EXPIRED : background job / lazy expiry (>15 min)
+    note right of CANCELLED
+      all three terminal states RELEASE the
+      reserve back to available_balance and
+      free the pump if one was assigned
+    end note
+
+    ACCEPTED --> CANCELLED
+    ACCEPTED --> REJECTED
+    ACCEPTED --> EXPIRED
+
+    AUTHORIZED --> CANCELLED : reaper cancels stale/no-telemetry txn
+    note right of AUTHORIZED
+      reaper path (STUCK_DISPENSE_TIMEOUT_MIN):
+      cancels the transaction, frees the pump,
+      returns the request to RESERVED — the
+      customer is never charged
+    end note
+```
+
+### Wallet ledger state machine
+
+Balances are the state; every `wallet_transactions.type` is a transition that
+updates exactly one pool under a row lock (`SELECT ... FOR UPDATE` on the wallet).
+
+```mermaid
+stateDiagram-v2
+    [*] --> PoolAvailable : wallet created / reset
+    PoolAvailable --> PoolAvailable : CASH_DEPOSIT (+available)
+    PoolAvailable --> PoolAvailable : REFUND (+available)
+    PoolAvailable --> PoolReserved : RESERVATION (-available +reserved)
+    note right of PoolReserved
+      only RESERVATION is allowed to move funds
+      from available into reserved; it fails with
+      insufficient_funds if available < amount
+    end note
+
+    PoolReserved --> PoolAvailable : RELEASE (+available -reserved)
+    note right of PoolReserved
+      RELEASE fires on cancel, reject, expiry,
+      and on settlement for the unused remainder
+    end note
+
+    PoolReserved --> PoolReserved : FUEL_PAYMENT (-reserved)
+    note right of PoolReserved
+      FUEL_PAYMENT is deducted from reserved only,
+      never from available — settlement is
+      claim-guarded so a duplicate ack cannot
+      double-charge the wallet
+    end note
+
+    PoolReserved --> [*] : wallet deactivated
+
+    note bottom of PoolAvailable
+      available_balance: topped up by deposits and
+      refunds; drawn down only by reservations
+    end note
+
+    note bottom of PoolReserved
+      reserved_balance: held against active fuel
+      requests; returned to available on release
+    end note
+```
+
 ## Implementation Plan (Spec)
 
 ### Stage 0 – Repository & Tooling ✅
